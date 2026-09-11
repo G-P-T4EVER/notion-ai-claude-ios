@@ -1,20 +1,32 @@
 #!/usr/bin/env python3
-"""Generates Assets.xcassets (app icon + colors) so no binary files live in git.
+"""Generates Resources/Assets.xcassets: app icon + accent and launch colors.
 
-Draws a Claude-style starburst mark on the Anthropic bone-white background.
+Standard library only (zlib/struct PNG writer), so CI needs no pip install and
+cannot trip over PEP 668 externally-managed environments.
+
+Draws the Claude-style starburst: tapered rays on Anthropic bone white.
 Run before `xcodegen generate`.
 """
+import binascii
 import json
 import math
 import os
-
-from PIL import Image, ImageDraw
+import struct
+import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ASSETS = os.path.join(ROOT, "Resources", "Assets.xcassets")
 
-BONE = (240, 238, 230, 255)
-CLAY = (217, 119, 87, 255)
+BONE = (240, 238, 230)
+CLAY = (217, 119, 87)
+
+SIZE = 1024
+RAYS = 11
+OUTER = SIZE * 0.36
+HALF_INNER = SIZE * 0.055
+HALF_OUTER = SIZE * 0.012
+STEP = 2.0 * math.pi / RAYS
+CENTER = SIZE / 2.0
 
 
 def write_json(path, payload):
@@ -24,128 +36,121 @@ def write_json(path, payload):
         handle.write("\n")
 
 
-def starburst(size=1024, rays=11, supersample=4):
-    """The Anthropic/Claude starburst: tapered rays radiating from a center."""
-    s = size * supersample
-    image = Image.new("RGBA", (s, s), BONE)
-    draw = ImageDraw.Draw(image)
-
-    cx = cy = s / 2.0
-    outer = s * 0.36
-    inner = s * 0.045
-    half_outer = s * 0.020
-    half_inner = s * 0.055
-
-    for index in range(rays):
-        angle = (2.0 * math.pi * index) / rays - math.pi / 2.0
-        ca, sa = math.cos(angle), math.sin(angle)
-        # Perpendicular direction used to give each ray its tapered waist.
-        px, py = -sa, ca
-
-        tip_x, tip_y = cx + ca * outer, cy + sa * outer
-        base_x, base_y = cx + ca * inner, cy + sa * inner
-
-        polygon = [
-            (tip_x + px * half_outer, tip_y + py * half_outer),
-            (tip_x - px * half_outer, tip_y - py * half_outer),
-            (base_x - px * half_inner, base_y - py * half_inner),
-            (base_x + px * half_inner, base_y + py * half_inner),
-        ]
-        draw.polygon(polygon, fill=CLAY)
-
-    hub = s * 0.055
-    draw.ellipse([cx - hub, cy - hub, cx + hub, cy + hub], fill=CLAY)
-
-    return image.resize((size, size), Image.LANCZOS)
+def chunk(tag, data):
+    crc = binascii.crc32(tag + data) & 0xFFFFFFFF
+    return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
 
 
-def color_set(name, red, green, blue):
-    write_json(
-        os.path.join(ASSETS, "%s.colorset" % name, "Contents.json"),
-        {
-            "colors": [
-                {
-                    "color": {
-                        "color-space": "srgb",
-                        "components": {
-                            "alpha": "1.000",
-                            "blue": "0x%02X" % blue,
-                            "green": "0x%02X" % green,
-                            "red": "0x%02X" % red,
-                        },
+def write_png(path, rows):
+    raw = b"".join(b"\x00" + row for row in rows)
+    header = struct.pack(">2I5B", SIZE, SIZE, 8, 2, 0, 0, 0)
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(raw, 9))
+        + chunk(b"IEND", b"")
+    )
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as handle:
+        handle.write(png)
+
+
+def coverage(x, y):
+    """2x2 supersampled coverage of the starburst at one pixel."""
+    hits = 0
+    for dx in (0.25, 0.75):
+        px = x + dx - CENTER
+        for dy in (0.25, 0.75):
+            py = y + dy - CENTER
+            r = math.hypot(px, py)
+            if r > OUTER:
+                continue
+            if r < HALF_INNER * 0.5:
+                hits += 1
+                continue
+            delta = math.atan2(py, px) % STEP
+            delta = min(delta, STEP - delta)
+            half = HALF_INNER + (HALF_OUTER - HALF_INNER) * (r / OUTER)
+            if r * delta <= half:
+                hits += 1
+    return hits / 4.0
+
+
+def icon_rows():
+    bone_row = bytes(BONE) * SIZE
+    rows = []
+    for y in range(SIZE):
+        dy = y + 0.5 - CENTER
+        if abs(dy) > OUTER + 1.0:
+            rows.append(bone_row)
+            continue
+
+        span = math.sqrt(max(0.0, (OUTER + 1.0) ** 2 - dy * dy))
+        left = max(0, int(CENTER - span) - 1)
+        right = min(SIZE - 1, int(CENTER + span) + 1)
+
+        row = bytearray(bone_row)
+        for x in range(left, right + 1):
+            alpha = coverage(x, y)
+            if alpha <= 0.0:
+                continue
+            if alpha >= 1.0:
+                pixel = CLAY
+            else:
+                pixel = tuple(
+                    int(BONE[i] + (CLAY[i] - BONE[i]) * alpha + 0.5) for i in range(3)
+                )
+            row[x * 3:x * 3 + 3] = bytes(pixel)
+        rows.append(bytes(row))
+    return rows
+
+
+def colorset(red, green, blue):
+    return {
+        "colors": [
+            {
+                "color": {
+                    "color-space": "srgb",
+                    "components": {
+                        "red": "0x%02X" % red,
+                        "green": "0x%02X" % green,
+                        "blue": "0x%02X" % blue,
+                        "alpha": "1.000",
                     },
+                },
+                "idiom": "universal",
+            }
+        ],
+        "info": {"author": "xcode", "version": 1},
+    }
+
+
+def main():
+    write_json(os.path.join(ASSETS, "Contents.json"), {"info": {"author": "xcode", "version": 1}})
+
+    write_json(
+        os.path.join(ASSETS, "AppIcon.appiconset", "Contents.json"),
+        {
+            "images": [
+                {
+                    "filename": "AppIcon.png",
                     "idiom": "universal",
+                    "platform": "ios",
+                    "size": "1024x1024",
                 }
             ],
             "info": {"author": "xcode", "version": 1},
         },
     )
 
-
-def main():
-    os.makedirs(ASSETS, exist_ok=True)
+    write_json(os.path.join(ASSETS, "AccentColor.colorset", "Contents.json"), colorset(*CLAY))
     write_json(
-        os.path.join(ASSETS, "Contents.json"),
-        {"info": {"author": "xcode", "version": 1}},
+        os.path.join(ASSETS, "LaunchBackground.colorset", "Contents.json"),
+        colorset(0x1A, 0x1A, 0x19),
     )
 
-    icon_dir = os.path.join(ASSETS, "AppIcon.appiconset")
-    os.makedirs(icon_dir, exist_ok=True)
-
-    # iOS 14 installs need the classic size matrix, not just the 1024 single icon.
-    specs = [
-        ("20x20", "2x", 40), ("20x20", "3x", 60),
-        ("29x29", "2x", 58), ("29x29", "3x", 87),
-        ("40x40", "2x", 80), ("40x40", "3x", 120),
-        ("60x60", "2x", 120), ("60x60", "3x", 180),
-    ]
-    ipad_specs = [
-        ("20x20", "1x", 20), ("20x20", "2x", 40),
-        ("29x29", "1x", 29), ("29x29", "2x", 58),
-        ("40x40", "1x", 40), ("40x40", "2x", 80),
-        ("76x76", "1x", 76), ("76x76", "2x", 152),
-        ("83.5x83.5", "2x", 167),
-    ]
-
-    master = starburst(1024)
-    images = []
-    rendered = {}
-
-    def emit(idiom, size, scale, pixels):
-        filename = "icon-%d.png" % pixels
-        if pixels not in rendered:
-            master.resize((pixels, pixels), Image.LANCZOS).convert("RGB").save(
-                os.path.join(icon_dir, filename)
-            )
-            rendered[pixels] = filename
-        images.append(
-            {"size": size, "idiom": idiom, "filename": filename, "scale": scale}
-        )
-
-    for size, scale, pixels in specs:
-        emit("iphone", size, scale, pixels)
-    for size, scale, pixels in ipad_specs:
-        emit("ipad", size, scale, pixels)
-
-    master.convert("RGB").save(os.path.join(icon_dir, "icon-1024.png"))
-    images.append(
-        {
-            "size": "1024x1024",
-            "idiom": "ios-marketing",
-            "filename": "icon-1024.png",
-            "scale": "1x",
-        }
-    )
-
-    write_json(
-        os.path.join(icon_dir, "Contents.json"),
-        {"images": images, "info": {"author": "xcode", "version": 1}},
-    )
-
-    color_set("LaunchBackground", 0x1A, 0x1A, 0x19)
-    color_set("AccentColor", 0xD9, 0x77, 0x57)
-
-    print("Assets written to %s" % ASSETS)
+    write_png(os.path.join(ASSETS, "AppIcon.appiconset", "AppIcon.png"), icon_rows())
+    print("Assets written to " + ASSETS)
 
 
 if __name__ == "__main__":
