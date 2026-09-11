@@ -26,17 +26,13 @@ jobs:
         run: brew install xcodegen
 
       - name: Generate app icon and color assets
-        run: |
-          python3 -m pip install --quiet --upgrade pip
-          python3 -m pip install --quiet pillow || python3 -m pip install --quiet --break-system-packages pillow
-          python3 Tools/make_icons.py
+        run: python3 Tools/make_icons.py
 
       - name: Generate Xcode project
         run: xcodegen generate
 
       - name: Build archive (no code signing)
         run: |
-          set -o pipefail
           xcodebuild archive \
             -project NotionClaude.xcodeproj \
             -scheme NotionClaude \
