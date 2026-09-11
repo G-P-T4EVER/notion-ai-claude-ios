@@ -1,0 +1,99 @@
+name: Build unsigned IPA / TIPA
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build .ipa and .tipa
+    runs-on: macos-14
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app || sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate app icon and color assets
+        run: |
+          python3 -m pip install --quiet --upgrade pip
+          python3 -m pip install --quiet pillow || python3 -m pip install --quiet --break-system-packages pillow
+          python3 Tools/make_icons.py
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build archive (no code signing)
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project NotionClaude.xcodeproj \
+            -scheme NotionClaude \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/NotionClaude.xcarchive \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Package .ipa and .tipa
+        run: |
+          set -e
+          APP_PATH="build/NotionClaude.xcarchive/Products/Applications/NotionClaude.app"
+          test -d "$APP_PATH"
+          rm -rf package && mkdir -p package/Payload
+          cp -R "$APP_PATH" package/Payload/
+          rm -rf package/Payload/NotionClaude.app/_CodeSignature
+          rm -f  package/Payload/NotionClaude.app/embedded.mobileprovision
+          cd package
+          zip -qry ../NotionClaude.ipa Payload
+          cd ..
+          cp NotionClaude.ipa NotionClaude.tipa
+          ls -lh NotionClaude.ipa NotionClaude.tipa
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: NotionClaude-unsigned
+          path: |
+            NotionClaude.ipa
+            NotionClaude.tipa
+          if-no-files-found: error
+
+      - name: Publish rolling release
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Build ${{ github.run_number }}
+          body: |
+            Unsigned build from commit ${{ github.sha }}.
+
+            * `NotionClaude.ipa` - for Sideloadly / AltStore / signing tools
+            * `NotionClaude.tipa` - for TrollStore (identical payload, different extension)
+
+            Minimum iOS: 14.0
+          files: |
+            NotionClaude.ipa
+            NotionClaude.tipa
+
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            NotionClaude.ipa
+            NotionClaude.tipa
