@@ -1,34 +1,64 @@
 import UIKit
 
-/// The main transcript screen.
 final class ChatViewController: UIViewController {
-    private let header = UIView()
-    private let menuButton = UIButton(type: .system)
-    private let titleLabel = UILabel()
-    private let newChatButton = UIButton(type: .system)
-    private let table = UITableView(frame: .zero, style: .plain)
+    private let tableView = UITableView(frame: .zero, style: .plain)
     private let composer = ComposerView()
     private let emptyState = EmptyStateView()
 
     private var conversation = ConversationStore.shared.create()
-    private var stream: NotionAIStream?
+    private let stream = NotionAIStream()
+    private var streamingIndex: Int?
     private var composerBottom: NSLayoutConstraint!
+    private var lastFailedPrompt: String?
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = Theme.background
 
-        buildHeader()
-        buildTable()
-        buildComposer()
-        buildEmptyState()
+        tableView.translatesAutoresizingMaskIntoConstraints = false
+        tableView.backgroundColor = .clear
+        tableView.separatorStyle = .none
+        tableView.dataSource = self
+        tableView.delegate = self
+        tableView.keyboardDismissMode = .interactive
+        tableView.rowHeight = UITableView.automaticDimension
+        tableView.estimatedRowHeight = 90
+        tableView.contentInset = UIEdgeInsets(top: 8, left: 0, bottom: 12, right: 0)
+        tableView.register(UserMessageCell.self, forCellReuseIdentifier: UserMessageCell.reuseID)
+        tableView.register(AssistantMessageCell.self, forCellReuseIdentifier: AssistantMessageCell.reuseID)
+        view.addSubview(tableView)
 
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(settingsChanged),
-            name: AppSettings.didChangeNotification,
-            object: nil
+        emptyState.translatesAutoresizingMaskIntoConstraints = false
+        emptyState.onPick = { [weak self] action in
+            self?.composer.text = action.prompt
+        }
+        view.addSubview(emptyState)
+
+        composer.translatesAutoresizingMaskIntoConstraints = false
+        composer.delegate = self
+        view.addSubview(composer)
+
+        composerBottom = composer.bottomAnchor.constraint(
+            equalTo: view.safeAreaLayoutGuide.bottomAnchor,
+            constant: -8
         )
+
+        NSLayoutConstraint.activate([
+            tableView.topAnchor.constraint(equalTo: view.topAnchor),
+            tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            tableView.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -6),
+
+            emptyState.topAnchor.constraint(equalTo: view.topAnchor),
+            emptyState.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            emptyState.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            emptyState.bottomAnchor.constraint(equalTo: composer.topAnchor),
+
+            composer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            composer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            composerBottom
+        ])
+
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(keyboardWillChange(_:)),
@@ -41,372 +71,313 @@ final class ChatViewController: UIViewController {
             name: UIResponder.keyboardWillHideNotification,
             object: nil
         )
-
-        refresh()
-    }
-
-    // MARK: - Layout
-
-    private func buildHeader() {
-        header.backgroundColor = Theme.background
-        header.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(header)
-
-        menuButton.setImage(UIImage(systemName: "line.3.horizontal"), for: .normal)
-        if menuButton.image(for: .normal) == nil {
-            menuButton.setImage(UIImage(systemName: "line.horizontal.3"), for: .normal)
-        }
-        menuButton.tintColor = Theme.textSecondary
-        menuButton.translatesAutoresizingMaskIntoConstraints = false
-        menuButton.addTarget(self, action: #selector(menuTapped), for: .touchUpInside)
-        header.addSubview(menuButton)
-
-        titleLabel.textColor = Theme.textPrimary
-        titleLabel.font = AppSettings.shared.chatFont.font(size: 16, weight: .medium)
-        titleLabel.textAlignment = .center
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        header.addSubview(titleLabel)
-
-        newChatButton.setImage(UIImage(systemName: "square.and.pencil"), for: .normal)
-        newChatButton.tintColor = Theme.textSecondary
-        newChatButton.translatesAutoresizingMaskIntoConstraints = false
-        newChatButton.addTarget(self, action: #selector(newChatTapped), for: .touchUpInside)
-        header.addSubview(newChatButton)
-
-        NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-            header.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            header.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            header.heightAnchor.constraint(equalToConstant: 48),
-
-            menuButton.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 16),
-            menuButton.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-            menuButton.widthAnchor.constraint(equalToConstant: 32),
-            menuButton.heightAnchor.constraint(equalToConstant: 32),
-
-            newChatButton.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -16),
-            newChatButton.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-            newChatButton.widthAnchor.constraint(equalToConstant: 32),
-            newChatButton.heightAnchor.constraint(equalToConstant: 32),
-
-            titleLabel.centerXAnchor.constraint(equalTo: header.centerXAnchor),
-            titleLabel.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-            titleLabel.leadingAnchor.constraint(equalTo: menuButton.trailingAnchor, constant: 8),
-            titleLabel.trailingAnchor.constraint(equalTo: newChatButton.leadingAnchor, constant: -8)
-        ])
-    }
-
-    private func buildTable() {
-        table.backgroundColor = Theme.background
-        table.separatorStyle = .none
-        table.dataSource = self
-        table.delegate = self
-        table.keyboardDismissMode = .interactive
-        table.estimatedRowHeight = 96
-        table.rowHeight = UITableView.automaticDimension
-        table.contentInset = UIEdgeInsets(top: 8, left: 0, bottom: 12, right: 0)
-        table.register(UserMessageCell.self, forCellReuseIdentifier: UserMessageCell.reuseID)
-        table.register(AssistantMessageCell.self, forCellReuseIdentifier: AssistantMessageCell.reuseID)
-        table.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(table)
-    }
-
-    private func buildComposer() {
-        composer.delegate = self
-        composer.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(composer)
-
-        composerBottom = composer.bottomAnchor.constraint(
-            equalTo: view.safeAreaLayoutGuide.bottomAnchor,
-            constant: -8
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(settingsChanged),
+            name: AppSettings.didChangeNotification,
+            object: nil
         )
 
-        NSLayoutConstraint.activate([
-            composer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            composer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            composerBottom,
-
-            table.topAnchor.constraint(equalTo: header.bottomAnchor),
-            table.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            table.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            table.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -6)
-        ])
+        refreshState()
     }
 
-    private func buildEmptyState() {
-        emptyState.translatesAutoresizingMaskIntoConstraints = false
-        emptyState.onPick = { [weak self] action in
-            self?.handle(action)
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        Feedback.prepare()
+        if conversation.messages.isEmpty {
+            emptyState.refreshGreeting()
         }
-        view.addSubview(emptyState)
-
-        NSLayoutConstraint.activate([
-            emptyState.topAnchor.constraint(equalTo: header.bottomAnchor),
-            emptyState.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            emptyState.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            emptyState.bottomAnchor.constraint(equalTo: composer.topAnchor)
-        ])
     }
 
     // MARK: - Conversation plumbing
 
     func loadConversation(_ id: String?) {
-        stream?.cancel()
-        stream = nil
+        stream.cancel()
+        streamingIndex = nil
         composer.setStreaming(false)
-        composer.stopDictation()
 
         if let id = id, let existing = ConversationStore.shared.conversation(withID: id) {
             conversation = existing
-        } else if conversation.messages.isEmpty {
-            // Reuse the current empty chat instead of piling up blank ones.
-            conversation.mode = AppSettings.shared.mode
-            conversation.modelID = AppSettings.shared.selectedModel.id
         } else {
             conversation = ConversationStore.shared.create()
+            if
+                let agentID = AppSettings.shared.defaultAgentID,
+                let agent = LibraryStore.shared.agent(withID: agentID)
+            {
+                conversation.agentID = agent.id
+                conversation.modelID = agent.modelID
+                conversation.effort = agent.effort
+            }
         }
 
-        AppSettings.shared.mode = conversation.mode
-        table.reloadData()
-        refresh()
-        scrollToBottom(animated: false)
+        tableView.reloadData()
+        refreshState()
+        if conversation.messages.isEmpty {
+            emptyState.refreshGreeting()
+        } else {
+            scrollToBottom(animated: false)
+        }
     }
 
     func prefill(_ text: String) {
         composer.text = text
-        _ = composer.becomeFirstResponder()
+        composer.becomeFirstResponder()
     }
 
-    private func refresh() {
-        titleLabel.text = conversation.messages.isEmpty ? "Notion AI" : conversation.title
-        emptyState.isHidden = !conversation.messages.isEmpty
+    private func refreshState() {
+        let empty = conversation.messages.isEmpty
+        emptyState.isHidden = !empty
+        tableView.isHidden = empty
         composer.refreshLabels()
     }
 
-    private func persist() {
-        ConversationStore.shared.save(conversation)
-        refresh()
+    @objc private func settingsChanged() {
+        composer.refreshLabels()
+        emptyState.refreshFonts()
+        tableView.reloadData()
     }
 
     private func scrollToBottom(animated: Bool) {
         guard !conversation.messages.isEmpty else { return }
         let indexPath = IndexPath(row: conversation.messages.count - 1, section: 0)
-        table.scrollToRow(at: indexPath, at: .bottom, animated: animated && !AppSettings.shared.motionReduced)
+        tableView.scrollToRow(at: indexPath, at: .bottom, animated: animated)
     }
 
-    private func refreshLastRow() {
-        guard !conversation.messages.isEmpty else { return }
-        let indexPath = IndexPath(row: conversation.messages.count - 1, section: 0)
+    private func persist() {
+        conversation.updatedAt = Date()
+        conversation.retitleIfNeeded()
+        ConversationStore.shared.save(conversation)
+    }
 
-        UIView.performWithoutAnimation {
-            table.reloadRows(at: [indexPath], with: .none)
+    // MARK: - Prompt assembly
+
+    private func systemPrompt() -> String {
+        var parts: [String] = []
+
+        if let agent = conversation.agentID.flatMap({ LibraryStore.shared.agent(withID: $0) }) {
+            parts.append("You are acting as the agent \"\(agent.name)\".")
+            parts.append(agent.instructions)
+            parts.append("Tone: \(agent.tone).")
         }
-        scrollToBottom(animated: false)
+
+        let skills = LibraryStore.shared.activeSkills
+        if !skills.isEmpty {
+            let lines = skills.map { "- \($0.name): \($0.prompt)" }.joined(separator: "\n")
+            parts.append("Active skills:\n" + lines)
+        }
+
+        let connectors = AppSettings.shared.enabledConnectorIDs
+            .compactMap { Connector.connector(for: $0)?.name }
+        if !connectors.isEmpty {
+            parts.append("Connected services: " + connectors.joined(separator: ", ") + ".")
+        }
+
+        let memory = LibraryStore.shared.memoryDigest()
+        if !memory.isEmpty {
+            parts.append("Known facts about the user:\n" + memory)
+        }
+
+        if AppSettings.shared.mode == .cowork {
+            parts.append("Cowork mode: propose concrete page edits and next actions.")
+        }
+
+        return parts.joined(separator: "\n\n")
     }
 
     // MARK: - Sending
 
     private func send(_ text: String) {
-        guard NotionSession.shared.isAuthenticated else {
-            presentSessionExpired()
+        if AppSettings.shared.isQuietTimeNow {
+            let alert = UIAlertController(
+                title: "Quiet hours are on",
+                message: "Notion AI is muted right now. Send anyway?",
+                preferredStyle: .alert
+            )
+            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { [weak self] _ in
+                self?.composer.text = text
+            })
+            alert.addAction(UIAlertAction(title: "Send", style: .default) { [weak self] _ in
+                self?.dispatch(text)
+            })
+            present(alert, animated: true)
             return
         }
+        dispatch(text)
+    }
 
-        conversation.messages.append(ChatMessage.user(text))
-        conversation.messages.append(ChatMessage.assistantPlaceholder())
-        conversation.modelID = AppSettings.shared.selectedModel.id
-        conversation.mode = AppSettings.shared.mode
-        persist()
+    private func dispatch(_ text: String) {
+        lastFailedPrompt = nil
+        let settings = AppSettings.shared
+        let model = AIModel.model(for: conversation.modelID == AIModel.default.id
+            ? settings.selectedModel.id
+            : conversation.modelID)
+        let effort = settings.effort
 
-        table.reloadData()
+        conversation.modelID = model.id
+        conversation.effort = effort
+        conversation.mode = settings.mode
+        conversation.skillIDs = settings.activeSkillIDs
+
+        conversation.messages.append(.user(text))
+        conversation.messages.append(.assistantPlaceholder(modelID: model.id))
+        streamingIndex = conversation.messages.count - 1
+
+        refreshState()
+        tableView.reloadData()
         scrollToBottom(animated: true)
         composer.setStreaming(true)
+        persist()
 
-        if AppSettings.shared.mode == .cowork {
-            groundInWorkspace(question: text) { [weak self] context in
-                self?.beginStream(workspaceContext: context)
-            }
-        } else {
-            beginStream(workspaceContext: nil)
+        let messages = conversation.messages.filter { !$0.isStreaming }
+
+        NotionAPI.shared.contextSnippet(for: text) { [weak self] context in
+            guard let self = self else { return }
+            let request = NotionAIStream.Request(
+                messages: messages,
+                mode: self.conversation.mode,
+                model: model,
+                effort: effort,
+                conversationID: self.conversation.id,
+                workspaceContext: context,
+                systemPrompt: self.systemPrompt()
+            )
+
+            self.stream.start(
+                request,
+                onDelta: { [weak self] delta in
+                    self?.appendDelta(delta)
+                },
+                onActivity: { [weak self] note in
+                    self?.appendActivity(note)
+                },
+                onProgress: { [weak self] progress in
+                    self?.updateProgress(progress)
+                },
+                onFinish: { [weak self] result in
+                    self?.finishStream(result, prompt: text)
+                }
+            )
         }
     }
 
-    /// Cowork mode: search the workspace first and hand the hits to the model.
-    private func groundInWorkspace(question: String, completion: @escaping (String?) -> Void) {
-        appendActivity(ActivityNote(symbol: "magnifyingglass", text: "Searching your workspace"))
+    private func appendDelta(_ delta: String) {
+        guard let index = streamingIndex, index < conversation.messages.count else { return }
+        conversation.messages[index].text += delta
+        conversation.messages[index].progress = nil
+        reloadStreamingRow(index)
+    }
 
-        NotionAPI.shared.search(query: question, limit: 8) { [weak self] result in
-            guard let self = self else { return }
-
-            switch result {
-            case .failure:
-                completion(nil)
-
-            case .success(let pages):
-                guard !pages.isEmpty else {
-                    completion(nil)
-                    return
-                }
-
-                self.appendActivity(
-                    ActivityNote(
-                        symbol: "doc.text",
-                        text: "Found " + String(pages.count) + " pages"
-                    )
-                )
-
-                let context = pages.map { page in
-                    "- " + page.title + " (" + page.url + ")" +
-                        (page.snippet.isEmpty ? "" : ": " + page.snippet)
-                }.joined(separator: "\n")
-
-                completion("Relevant pages from the user's Notion workspace:\n" + context)
-            }
-        }
+    private func updateProgress(_ progress: String) {
+        guard let index = streamingIndex, index < conversation.messages.count else { return }
+        guard conversation.messages[index].text.isEmpty else { return }
+        conversation.messages[index].progress = progress
+        reloadStreamingRow(index)
     }
 
     private func appendActivity(_ note: ActivityNote) {
-        guard let index = conversation.messages.indices.last else { return }
-        guard conversation.messages[index].role == .assistant else { return }
+        guard let index = streamingIndex, index < conversation.messages.count else { return }
         guard !conversation.messages[index].activity.contains(note) else { return }
-
         conversation.messages[index].activity.append(note)
-        refreshLastRow()
+        reloadStreamingRow(index)
     }
 
-    private func beginStream(workspaceContext: String?) {
-        let history = conversation.messages.filter { !($0.role == .assistant && $0.text.isEmpty) }
+    private func reloadStreamingRow(_ index: Int) {
+        let indexPath = IndexPath(row: index, section: 0)
+        guard tableView.numberOfRows(inSection: 0) > index else {
+            tableView.reloadData()
+            return
+        }
+        UIView.performWithoutAnimation {
+            tableView.reloadRows(at: [indexPath], with: .none)
+        }
+        let isNearBottom = tableView.contentOffset.y
+            >= tableView.contentSize.height - tableView.bounds.height - 140
+        if isNearBottom { scrollToBottom(animated: false) }
+    }
 
-        let request = NotionAIStream.Request(
-            messages: history,
-            mode: AppSettings.shared.mode,
-            model: AppSettings.shared.selectedModel,
-            conversationID: conversation.id,
-            workspaceContext: workspaceContext
-        )
+    private func finishStream(_ result: Result<String, Error>, prompt: String) {
+        composer.setStreaming(false)
+        guard let index = streamingIndex, index < conversation.messages.count else { return }
+        streamingIndex = nil
+        conversation.messages[index].isStreaming = false
+        conversation.messages[index].progress = nil
 
-        let stream = NotionAIStream()
-        self.stream = stream
+        switch result {
+        case .success(let text):
+            conversation.messages[index].text = text
+            Feedback.success()
+        case .failure(let error):
+            conversation.messages[index].failed = true
+            conversation.messages[index].text = errorText(for: error)
+            lastFailedPrompt = prompt
+            Feedback.error()
+            presentFailure(error)
+        }
 
-        stream.start(
-            request,
-            onDelta: { [weak self] delta in
-                guard let self = self, let index = self.conversation.messages.indices.last else { return }
-                self.conversation.messages[index].text += delta
-                self.refreshLastRow()
-            },
-            onActivity: { [weak self] note in
-                self?.appendActivity(note)
-            },
-            onFinish: { [weak self] result in
-                guard let self = self else { return }
-                guard let index = self.conversation.messages.indices.last else { return }
+        tableView.reloadData()
+        scrollToBottom(animated: true)
+        persist()
+    }
 
-                self.composer.setStreaming(false)
-                self.conversation.messages[index].isStreaming = false
-
-                switch result {
-                case .success(let text):
-                    if !text.isEmpty {
-                        self.conversation.messages[index].text = text
-                    }
-                    Haptics.success()
-
-                case .failure(let error):
-                    self.conversation.messages[index].failed = true
-                    self.conversation.messages[index].text = error.localizedDescription
-                    Haptics.warning()
-
-                    if case NotionError.sessionExpired = error {
-                        self.presentSessionExpired()
-                    }
-                }
-
-                self.persist()
-                self.refreshLastRow()
+    private func errorText(for error: Error) -> String {
+        if let notionError = error as? NotionError {
+            switch notionError {
+            case .sessionExpired:
+                return "Your Notion session expired. Sign in again from Settings → Account."
+            case .notAuthenticated:
+                return "Not signed in to Notion."
+            case .http(let code):
+                return "Notion AI refused the request (HTTP \(code)). Try a different endpoint path in Settings → Capabilities."
+            case .endpointUnavailable(let detail):
+                return "Notion AI replied in an unexpected shape:\n\n" + detail
+            case .transport(let detail):
+                return "Network problem: " + detail
+            case .malformedResponse:
+                return "Notion AI sent a response this build could not parse. Open Settings → Capabilities → Last response to see the raw payload."
             }
-        )
-    }
-
-    private func retryLastTurn() {
-        guard let lastUser = conversation.messages.last(where: { $0.role == .user })?.text else { return }
-
-        while let last = conversation.messages.last, last.role == .assistant {
-            conversation.messages.removeLast()
         }
-        if conversation.messages.last?.role == .user {
-            conversation.messages.removeLast()
-        }
-
-        table.reloadData()
-        send(lastUser)
+        return error.localizedDescription
     }
 
-    // MARK: - Actions
-
-    @objc private func menuTapped() {
-        Haptics.tap()
-        RootController.current?.toggleSidebar()
-    }
-
-    @objc private func newChatTapped() {
-        Haptics.tap()
-        loadConversation(nil)
-    }
-
-    @objc private func settingsChanged() {
-        titleLabel.font = AppSettings.shared.chatFont.font(size: 16, weight: .medium)
-        emptyState.refreshFonts()
-        composer.refreshLabels()
-        table.reloadData()
-    }
-
-    private func handle(_ action: QuickAction) {
-        if action.title == "Claude's choice" {
-            send(action.prompt)
-        } else {
-            prefill(action.prompt)
-        }
-    }
-
-    private func presentSessionExpired() {
+    private func presentFailure(_ error: Error) {
         let alert = UIAlertController(
-            title: "Session expired",
-            message: "Sign in to Notion again to keep chatting.",
+            title: "Request failed",
+            message: errorText(for: error),
             preferredStyle: .alert
         )
-        alert.addAction(UIAlertAction(title: "Sign in", style: .default) { _ in
-            NotionSession.shared.signOut()
+        alert.addAction(UIAlertAction(title: "Close", style: .cancel))
+        if let prompt = lastFailedPrompt {
+            alert.addAction(UIAlertAction(title: "Retry", style: .default) { [weak self] _ in
+                guard let self = self else { return }
+                if !self.conversation.messages.isEmpty { self.conversation.messages.removeLast() }
+                if !self.conversation.messages.isEmpty { self.conversation.messages.removeLast() }
+                self.dispatch(prompt)
+            })
+        }
+        alert.addAction(UIAlertAction(title: "Diagnostics", style: .default) { _ in
+            RootController.current?.presentSettings(initialSection: .capabilities)
         })
-        alert.addAction(UIAlertAction(title: "Later", style: .cancel, handler: nil))
-        present(alert, animated: true, completion: nil)
+        present(alert, animated: true)
     }
 
     // MARK: - Keyboard
 
-    @objc private func keyboardWillChange(_ notification: Notification) {
-        guard let frame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue else { return }
+    @objc private func keyboardWillChange(_ note: Notification) {
+        guard
+            let frame = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue,
+            let duration = note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double
+        else { return }
 
-        let height = view.convert(frame.cgRectValue, from: nil).height
-        let inset = max(0, height - view.safeAreaInsets.bottom)
-        composerBottom.constant = -8 - inset
-
-        let duration = (notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
-        UIView.animate(withDuration: AppSettings.shared.motionReduced ? 0 : duration) {
-            self.view.layoutIfNeeded()
-        }
-        scrollToBottom(animated: false)
+        let overlap = max(0, view.bounds.maxY - frame.minY - view.safeAreaInsets.bottom)
+        composerBottom.constant = -8 - overlap
+        UIView.animate(withDuration: duration) { self.view.layoutIfNeeded() }
     }
 
     @objc private func keyboardWillHide() {
         composerBottom.constant = -8
-        UIView.animate(withDuration: AppSettings.shared.motionReduced ? 0 : 0.22) {
-            self.view.layoutIfNeeded()
-        }
+        UIView.animate(withDuration: 0.2) { self.view.layoutIfNeeded() }
     }
 }
-
-// MARK: - Table
 
 extension ChatViewController: UITableViewDataSource, UITableViewDelegate {
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
@@ -415,7 +386,6 @@ extension ChatViewController: UITableViewDataSource, UITableViewDelegate {
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let message = conversation.messages[indexPath.row]
-
         switch message.role {
         case .user:
             let cell = tableView.dequeueReusableCell(
@@ -424,7 +394,6 @@ extension ChatViewController: UITableViewDataSource, UITableViewDelegate {
             ) as! UserMessageCell
             cell.configure(with: message)
             return cell
-
         case .assistant:
             let cell = tableView.dequeueReusableCell(
                 withIdentifier: AssistantMessageCell.reuseID,
@@ -441,21 +410,15 @@ extension ChatViewController: UITableViewDataSource, UITableViewDelegate {
         point: CGPoint
     ) -> UIContextMenuConfiguration? {
         let message = conversation.messages[indexPath.row]
-
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in
             let copy = UIAction(title: "Copy", image: UIImage(systemName: "doc.on.doc")) { _ in
                 UIPasteboard.general.string = Markdown.plainText(message.text)
-                Haptics.success()
+                Feedback.success()
             }
-            let retry = UIAction(title: "Retry", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
-                self?.retryLastTurn()
-            }
-            return UIMenu(title: "", children: [copy, retry])
+            return UIMenu(title: "", children: [copy])
         }
     }
 }
-
-// MARK: - Composer
 
 extension ChatViewController: ComposerViewDelegate {
     func composerDidSend(_ text: String) {
@@ -463,86 +426,79 @@ extension ChatViewController: ComposerViewDelegate {
     }
 
     func composerDidTapStop() {
-        stream?.cancel()
-        stream = nil
+        stream.cancel()
         composer.setStreaming(false)
-
-        if let index = conversation.messages.indices.last {
+        if let index = streamingIndex, index < conversation.messages.count {
             conversation.messages[index].isStreaming = false
+            conversation.messages[index].progress = nil
             if conversation.messages[index].text.isEmpty {
                 conversation.messages[index].text = "Stopped."
             }
+            tableView.reloadData()
+            persist()
         }
-        persist()
-        refreshLastRow()
+        streamingIndex = nil
     }
 
     func composerDidTapPlus() {
         let sheet = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
-
-        sheet.addAction(UIAlertAction(title: "Browse workspace", style: .default) { _ in
+        sheet.addAction(UIAlertAction(title: "Search workspace", style: .default) { _ in
             RootController.current?.presentWorkspace()
         })
-        sheet.addAction(UIAlertAction(title: "Reference a page", style: .default) { [weak self] _ in
-            self?.presentPagePicker()
+        sheet.addAction(UIAlertAction(title: "Skills", style: .default) { [weak self] _ in
+            self?.composerDidTapSkills()
         })
-        sheet.addAction(UIAlertAction(title: "Skills", style: .default) { _ in
-            RootController.current?.presentSettings(initialSection: .skills)
+        sheet.addAction(UIAlertAction(title: "Agents", style: .default) { _ in
+            RootController.current?.presentSettings(initialSection: .agents)
         })
         sheet.addAction(UIAlertAction(title: "Connectors", style: .default) { _ in
             RootController.current?.presentSettings(initialSection: .connectors)
         })
-        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel, handler: nil))
-        present(sheet, animated: true, completion: nil)
-    }
-
-    private func presentPagePicker() {
-        let picker = WorkspaceViewController()
-        picker.onPick = { [weak self] page in
-            guard let self = self else { return }
-            let current = self.composer.text
-            let reference = "[" + page.title + "](" + page.url + ") "
-            self.composer.text = current.isEmpty ? reference : current + " " + reference
-        }
-        present(UINavigationController(rootViewController: picker), animated: true, completion: nil)
+        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        sheet.popoverPresentationController?.sourceView = composer
+        sheet.popoverPresentationController?.sourceRect = composer.bounds
+        present(sheet, animated: true)
     }
 
     func composerDidTapModel() {
-        let sheet = UIAlertController(title: "Model", message: nil, preferredStyle: .actionSheet)
-
-        for model in AIModel.all {
-            let selected = model == AppSettings.shared.selectedModel
-            let title = (selected ? "\u{2713}  " : "") + model.name + " \u{00B7} " + model.effort
-            sheet.addAction(UIAlertAction(title: title, style: .default) { [weak self] _ in
-                AppSettings.shared.selectedModel = model
-                self?.composer.refreshLabels()
-            })
+        let settings = AppSettings.shared
+        let picker = ModelPickerViewController(model: settings.selectedModel, effort: settings.effort)
+        picker.onChange = { [weak self] model, effort in
+            settings.selectedModel = model
+            settings.effort = effort
+            self?.conversation.modelID = model.id
+            self?.conversation.effort = effort
+            self?.composer.refreshLabels()
+            self?.emptyState.refreshGreeting()
         }
+        let navigation = UINavigationController(rootViewController: picker)
+        Feedback.sheet()
+        present(navigation, animated: true)
+    }
 
-        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel, handler: nil))
-        present(sheet, animated: true, completion: nil)
+    func composerDidTapSkills() {
+        let skills = SkillsViewController(pickMode: true)
+        skills.onPick = { [weak self] skill in
+            guard let self = self else { return }
+            let existing = self.composer.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            self.composer.text = existing.isEmpty
+                ? skill.prompt + " "
+                : existing + "\n\n" + skill.prompt + " "
+            self.composer.becomeFirstResponder()
+        }
+        let navigation = UINavigationController(rootViewController: skills)
+        Feedback.sheet()
+        present(navigation, animated: true)
     }
 
     func composerDidChangeMode(_ mode: ChatMode) {
         conversation.mode = mode
-
-        let banner = UIAlertController(title: mode.title, message: mode.hint, preferredStyle: .alert)
-        banner.addAction(UIAlertAction(title: "Got it", style: .default, handler: nil))
-        present(banner, animated: true, completion: nil)
-    }
-
-    func composerDidTapVoiceMode() {
-        let alert = UIAlertController(
-            title: "Voice mode",
-            message: "Hold the mic to dictate. Full duplex voice needs a Notion realtime endpoint, which is not public yet.",
-            preferredStyle: .alert
-        )
-        alert.addAction(UIAlertAction(title: "OK", style: .default, handler: nil))
-        present(alert, animated: true, completion: nil)
+        emptyState.refreshGreeting()
     }
 
     func composerHeightChanged() {
         view.layoutIfNeeded()
+        guard !conversation.messages.isEmpty else { return }
         scrollToBottom(animated: false)
     }
 

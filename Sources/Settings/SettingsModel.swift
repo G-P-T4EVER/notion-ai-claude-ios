@@ -1,4 +1,4 @@
-import Foundation
+import UIKit
 
 enum SettingsGroup: Int, CaseIterable {
     case settings
@@ -6,13 +6,12 @@ enum SettingsGroup: Int, CaseIterable {
 
     var title: String {
         switch self {
-        case .settings: return "Settings"
-        case .customize: return "Customize"
+        case .settings: return "SETTINGS"
+        case .customize: return "CUSTOMIZE"
         }
     }
 }
 
-/// Mirrors the desktop client's settings sidebar one-to-one.
 enum SettingsSection: String, CaseIterable {
     case general
     case account
@@ -22,7 +21,7 @@ enum SettingsSection: String, CaseIterable {
     case memory
     case reflect
     case timeAndFocus
-    case claudeCode
+    case agents
     case skills
     case connectors
     case plugins
@@ -37,7 +36,7 @@ enum SettingsSection: String, CaseIterable {
         case .memory: return "Memory"
         case .reflect: return "Reflect"
         case .timeAndFocus: return "Time and focus"
-        case .claudeCode: return "Claude Code"
+        case .agents: return "Agents"
         case .skills: return "Skills"
         case .connectors: return "Connectors"
         case .plugins: return "Plugins"
@@ -46,24 +45,24 @@ enum SettingsSection: String, CaseIterable {
 
     var symbol: String {
         switch self {
-        case .general: return "slider.horizontal.3"
-        case .account: return "person.crop.circle"
+        case .general: return "gearshape"
+        case .account: return "person.circle"
         case .privacy: return "lock"
         case .billing: return "creditcard"
         case .capabilities: return "wand.and.stars"
         case .memory: return "brain"
-        case .reflect: return "chart.bar"
+        case .reflect: return "chart.line.uptrend.xyaxis"
         case .timeAndFocus: return "clock"
-        case .claudeCode: return "terminal"
-        case .skills: return "sparkles"
-        case .connectors: return "puzzlepiece"
-        case .plugins: return "square.stack.3d.up"
+        case .agents: return "person.2.badge.gearshape"
+        case .skills: return "square.grid.2x2"
+        case .connectors: return "link"
+        case .plugins: return "puzzlepiece.extension"
         }
     }
 
     var group: SettingsGroup {
         switch self {
-        case .skills, .connectors, .plugins: return .customize
+        case .agents, .skills, .connectors, .plugins: return .customize
         default: return .settings
         }
     }
@@ -73,13 +72,12 @@ enum SettingsSection: String, CaseIterable {
     }
 }
 
-/// A single row inside a settings detail screen.
 struct SettingsRow {
     enum Accessory {
         case none
+        case disclosure
         case checkmark(Bool)
         case toggle(Bool, (Bool) -> Void)
-        case disclosure
         case value(String)
     }
 

@@ -1,13 +1,16 @@
 import UIKit
 
-/// Hosts the chat screen plus the slide-over sidebar. Hand-rolled instead of
-/// UISplitViewController so the drawer behaves identically on iOS 14 and 16.
 final class RootController: UIViewController {
     static weak var current: RootController?
 
+    private let header = UIView()
+    private let menuButton = UIButton(type: .system)
+    private let workspaceButton = UIButton(type: .system)
+    private let newChatButton = UIButton(type: .system)
+
     private let chat = ChatViewController()
     private let sidebar = SidebarViewController()
-    private let dimmer = UIView()
+    private let dimView = UIView()
 
     private let sidebarWidth: CGFloat = 300
     private var sidebarLeading: NSLayoutConstraint!
@@ -15,50 +18,140 @@ final class RootController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = Theme.background
         RootController.current = self
+        view.backgroundColor = Theme.background
 
+        buildHeader()
+        buildChat()
+        buildSidebar()
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(sessionChanged),
+            name: NotionSession.didChangeNotification,
+            object: nil
+        )
+
+        refreshWorkspaceButton()
+        loadProfile()
+    }
+
+    // MARK: - Build
+
+    private func buildHeader() {
+        header.translatesAutoresizingMaskIntoConstraints = false
+        header.backgroundColor = Theme.background
+        view.addSubview(header)
+
+        menuButton.translatesAutoresizingMaskIntoConstraints = false
+        menuButton.setImage(UIImage(systemName: "line.3.horizontal"), for: .normal)
+        menuButton.tintColor = Theme.textSecondary
+        menuButton.addTarget(self, action: #selector(menuTapped), for: .touchUpInside)
+        header.addSubview(menuButton)
+
+        workspaceButton.translatesAutoresizingMaskIntoConstraints = false
+        workspaceButton.setTitleColor(Theme.textPrimary, for: .normal)
+        workspaceButton.titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
+        workspaceButton.tintColor = Theme.textTertiary
+        workspaceButton.semanticContentAttribute = .forceRightToLeft
+        workspaceButton.setImage(UIImage(systemName: "chevron.down"), for: .normal)
+        workspaceButton.imageEdgeInsets = UIEdgeInsets(top: 1, left: 6, bottom: 0, right: 0)
+        workspaceButton.addTarget(self, action: #selector(workspaceTapped), for: .touchUpInside)
+        header.addSubview(workspaceButton)
+
+        newChatButton.translatesAutoresizingMaskIntoConstraints = false
+        newChatButton.setImage(UIImage(systemName: "square.and.pencil"), for: .normal)
+        newChatButton.tintColor = Theme.textSecondary
+        newChatButton.addTarget(self, action: #selector(newChatTapped), for: .touchUpInside)
+        header.addSubview(newChatButton)
+
+        NSLayoutConstraint.activate([
+            header.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            header.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            header.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            header.heightAnchor.constraint(equalToConstant: 48),
+
+            menuButton.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 12),
+            menuButton.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            menuButton.widthAnchor.constraint(equalToConstant: 36),
+            menuButton.heightAnchor.constraint(equalToConstant: 36),
+
+            workspaceButton.leadingAnchor.constraint(equalTo: menuButton.trailingAnchor, constant: 4),
+            workspaceButton.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            workspaceButton.trailingAnchor.constraint(lessThanOrEqualTo: newChatButton.leadingAnchor, constant: -8),
+
+            newChatButton.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -12),
+            newChatButton.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            newChatButton.widthAnchor.constraint(equalToConstant: 36),
+            newChatButton.heightAnchor.constraint(equalToConstant: 36)
+        ])
+    }
+
+    private func buildChat() {
         addChild(chat)
+        chat.view.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(chat.view)
-        chat.view.pinEdges(to: view)
         chat.didMove(toParent: self)
 
-        dimmer.backgroundColor = UIColor.black.withAlphaComponent(0.45)
-        dimmer.alpha = 0
-        dimmer.isUserInteractionEnabled = false
-        view.addSubview(dimmer)
-        dimmer.pinEdges(to: view)
-        dimmer.addGestureRecognizer(
-            UITapGestureRecognizer(target: self, action: #selector(closeSidebar))
+        NSLayoutConstraint.activate([
+            chat.view.topAnchor.constraint(equalTo: header.bottomAnchor),
+            chat.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            chat.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            chat.view.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
+    }
+
+    private func buildSidebar() {
+        dimView.translatesAutoresizingMaskIntoConstraints = false
+        dimView.backgroundColor = UIColor.black.withAlphaComponent(0.45)
+        dimView.alpha = 0
+        dimView.isUserInteractionEnabled = false
+        view.addSubview(dimView)
+        dimView.pinEdges(to: view)
+        dimView.addGestureRecognizer(
+            UITapGestureRecognizer(target: self, action: #selector(closeSidebarTapped))
         )
 
         sidebar.delegate = self
         addChild(sidebar)
+        sidebar.view.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(sidebar.view)
         sidebar.didMove(toParent: self)
 
-        sidebar.view.translatesAutoresizingMaskIntoConstraints = false
         sidebarLeading = sidebar.view.leadingAnchor.constraint(
             equalTo: view.leadingAnchor,
             constant: -sidebarWidth
         )
+
         NSLayoutConstraint.activate([
             sidebar.view.topAnchor.constraint(equalTo: view.topAnchor),
             sidebar.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             sidebar.view.widthAnchor.constraint(equalToConstant: sidebarWidth),
             sidebarLeading
         ])
-        sidebar.view.layer.shadowColor = UIColor.black.cgColor
-        sidebar.view.layer.shadowOpacity = 0.35
-        sidebar.view.layer.shadowRadius = 18
-        sidebar.view.layer.shadowOffset = CGSize(width: 2, height: 0)
 
         let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
         pan.delegate = self
         view.addGestureRecognizer(pan)
     }
 
-    override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
+    // MARK: - Session
+
+    @objc private func sessionChanged() {
+        refreshWorkspaceButton()
+    }
+
+    private func refreshWorkspaceButton() {
+        let name = NotionSession.shared.spaceName
+        workspaceButton.setTitle(name?.isEmpty == false ? name : "Notion AI", for: .normal)
+    }
+
+    private func loadProfile() {
+        guard NotionSession.shared.isAuthenticated else { return }
+        NotionAPI.shared.loadUserContent { [weak self] _ in
+            self?.refreshWorkspaceButton()
+        }
+    }
 
     // MARK: - Sidebar
 
@@ -66,37 +159,37 @@ final class RootController: UIViewController {
         setSidebar(open: !isSidebarOpen)
     }
 
-    @objc func closeSidebar() {
+    func closeSidebar() {
         setSidebar(open: false)
     }
 
-    private func setSidebar(open: Bool, velocity: CGFloat = 0) {
+    private func setSidebar(open: Bool) {
         isSidebarOpen = open
-        view.endEditing(true)
-        if open { sidebar.reload() }
-
         sidebarLeading.constant = open ? 0 : -sidebarWidth
-        dimmer.isUserInteractionEnabled = open
+        dimView.isUserInteractionEnabled = open
 
         let animations = {
-            self.dimmer.alpha = open ? 1 : 0
+            self.dimView.alpha = open ? 1 : 0
             self.view.layoutIfNeeded()
         }
 
-        guard !AppSettings.shared.motionReduced else {
+        if AppSettings.shared.motionReduced {
             animations()
-            return
+        } else {
+            UIView.animate(
+                withDuration: 0.32,
+                delay: 0,
+                usingSpringWithDamping: 0.86,
+                initialSpringVelocity: 0.4,
+                options: [.curveEaseOut],
+                animations: animations
+            )
         }
+    }
 
-        UIView.animate(
-            withDuration: 0.34,
-            delay: 0,
-            usingSpringWithDamping: 0.9,
-            initialSpringVelocity: abs(velocity) / sidebarWidth,
-            options: [.curveEaseOut],
-            animations: animations,
-            completion: nil
-        )
+    @objc private func closeSidebarTapped() {
+        Feedback.tap()
+        closeSidebar()
     }
 
     @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
@@ -106,59 +199,94 @@ final class RootController: UIViewController {
         case .changed:
             let base: CGFloat = isSidebarOpen ? 0 : -sidebarWidth
             sidebarLeading.constant = min(0, max(-sidebarWidth, base + translation))
-            dimmer.alpha = 1 - abs(sidebarLeading.constant) / sidebarWidth
-
+            dimView.alpha = 1 + sidebarLeading.constant / sidebarWidth
         case .ended, .cancelled:
             let velocity = gesture.velocity(in: view).x
-            let progress = 1 - abs(sidebarLeading.constant) / sidebarWidth
-            let shouldOpen = velocity > 350 || (velocity > -350 && progress > 0.5)
-            setSidebar(open: shouldOpen, velocity: velocity)
-
+            let shouldOpen = velocity > 250
+                || (velocity > -250 && sidebarLeading.constant > -sidebarWidth / 2)
+            if shouldOpen != isSidebarOpen { Feedback.sheet() }
+            setSidebar(open: shouldOpen)
         default:
             break
         }
     }
 
-    // MARK: - Navigation helpers
+    // MARK: - Actions
+
+    @objc private func menuTapped() {
+        Feedback.tap()
+        toggleSidebar()
+    }
+
+    @objc private func newChatTapped() {
+        Feedback.tap()
+        startNewChat()
+    }
+
+    @objc private func workspaceTapped() {
+        Feedback.tap()
+        presentWorkspaceSwitcher()
+    }
 
     func startNewChat() {
         chat.loadConversation(nil)
-        setSidebar(open: false)
+        closeSidebar()
     }
 
     func open(conversationID: String) {
         chat.loadConversation(conversationID)
-        setSidebar(open: false)
+        closeSidebar()
     }
 
     func prefillComposer(with text: String) {
-        presentedViewController?.dismiss(animated: true, completion: nil)
         chat.prefill(text)
-        setSidebar(open: false)
     }
 
     func presentSettings(initialSection: SettingsSection = .general) {
-        setSidebar(open: false)
-        present(
-            SettingsHost.makeViewController(initialSection: initialSection),
-            animated: !AppSettings.shared.motionReduced,
-            completion: nil
-        )
+        Feedback.sheet()
+        closeSidebar()
+        let controller = SettingsHost.makeViewController(initialSection: initialSection)
+        controller.modalPresentationStyle = .fullScreen
+        topPresenter().present(controller, animated: true)
     }
 
     func presentWorkspace() {
-        setSidebar(open: false)
-        let navigation = UINavigationController(rootViewController: WorkspaceViewController())
-        present(navigation, animated: !AppSettings.shared.motionReduced, completion: nil)
+        Feedback.sheet()
+        closeSidebar()
+        let workspace = WorkspaceViewController()
+        workspace.onPick = { [weak self] page in
+            self?.prefillComposer(with: "About the page \"\(page.title)\": ")
+        }
+        topPresenter().present(UINavigationController(rootViewController: workspace), animated: true)
+    }
+
+    func presentWorkspaceSwitcher() {
+        closeSidebar()
+        let switcher = WorkspaceSwitcherViewController()
+        switcher.onSwitch = { [weak self] _ in
+            self?.refreshWorkspaceButton()
+            self?.startNewChat()
+        }
+        topPresenter().present(UINavigationController(rootViewController: switcher), animated: true)
+    }
+
+    private func topPresenter() -> UIViewController {
+        var controller: UIViewController = self
+        while let presented = controller.presentedViewController, !presented.isBeingDismissed {
+            controller = presented
+        }
+        return controller
     }
 }
 
 extension RootController: SidebarDelegate {
     func sidebarDidRequestNewChat() {
+        Feedback.tap()
         startNewChat()
     }
 
     func sidebarDidSelect(conversationID: String) {
+        Feedback.selection()
         open(conversationID: conversationID)
     }
 
@@ -172,15 +300,18 @@ extension RootController: SidebarDelegate {
 }
 
 extension RootController: UIGestureRecognizerDelegate {
-    /// Only start the drawer gesture from the screen edge so chat scrolling and
-    /// text selection keep working.
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         guard let pan = gestureRecognizer as? UIPanGestureRecognizer else { return true }
-
-        let translation = pan.translation(in: view)
-        guard abs(translation.x) > abs(translation.y) else { return false }
-
+        let velocity = pan.velocity(in: view)
+        guard abs(velocity.x) > abs(velocity.y) else { return false }
         if isSidebarOpen { return true }
         return pan.location(in: view).x < 40
+    }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
+    ) -> Bool {
+        false
     }
 }

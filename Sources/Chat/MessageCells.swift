@@ -1,6 +1,5 @@
 import UIKit
 
-/// Right-aligned rounded bubble, exactly like the user turns in Claude.
 final class UserMessageCell: UITableViewCell {
     static let reuseID = "UserMessageCell"
 
@@ -13,21 +12,23 @@ final class UserMessageCell: UITableViewCell {
         contentView.backgroundColor = .clear
         selectionStyle = .none
 
+        bubble.translatesAutoresizingMaskIntoConstraints = false
         bubble.backgroundColor = Theme.userBubble
         bubble.layer.cornerRadius = 18
-        bubble.translatesAutoresizingMaskIntoConstraints = false
+        bubble.layer.cornerCurve = .continuous
         contentView.addSubview(bubble)
 
+        label.translatesAutoresizingMaskIntoConstraints = false
         label.numberOfLines = 0
         label.textColor = Theme.textPrimary
-        label.translatesAutoresizingMaskIntoConstraints = false
         bubble.addSubview(label)
 
         NSLayoutConstraint.activate([
             bubble.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 6),
             bubble.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -6),
             bubble.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
-            bubble.leadingAnchor.constraint(greaterThanOrEqualTo: contentView.leadingAnchor, constant: 64),
+            bubble.leadingAnchor.constraint(greaterThanOrEqualTo: contentView.leadingAnchor, constant: 62),
+
             label.topAnchor.constraint(equalTo: bubble.topAnchor, constant: 11),
             label.bottomAnchor.constraint(equalTo: bubble.bottomAnchor, constant: -11),
             label.leadingAnchor.constraint(equalTo: bubble.leadingAnchor, constant: 14),
@@ -46,15 +47,17 @@ final class UserMessageCell: UITableViewCell {
     }
 }
 
-/// Assistant turn: starburst in the gutter, optional activity rows, Markdown
-/// body and a blinking caret while streaming.
 final class AssistantMessageCell: UITableViewCell {
     static let reuseID = "AssistantMessageCell"
 
-    private let mark = StarburstView()
-    private let activityStack = UIStackView()
+    private let mark = BrandMarkView(rays: 11)
+    private let stack = UIStackView()
+    private let modelLabel = UILabel()
     private let bodyLabel = UILabel()
-    private let caret = UIView()
+    private let progressLabel = UILabel()
+    private let activityLabel = UILabel()
+    private let errorLabel = UILabel()
+    private var shimmerTimer: Timer?
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
@@ -62,123 +65,130 @@ final class AssistantMessageCell: UITableViewCell {
         contentView.backgroundColor = .clear
         selectionStyle = .none
 
-        mark.color = Theme.accent
         mark.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(mark)
 
-        activityStack.axis = .vertical
-        activityStack.spacing = 4
-        activityStack.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(activityStack)
+        modelLabel.numberOfLines = 1
+        modelLabel.textColor = Theme.textTertiary
+        modelLabel.font = .systemFont(ofSize: 11, weight: .semibold)
 
         bodyLabel.numberOfLines = 0
         bodyLabel.textColor = Theme.textPrimary
-        bodyLabel.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(bodyLabel)
 
-        caret.backgroundColor = Theme.accent
-        caret.layer.cornerRadius = 1
-        caret.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(caret)
+        progressLabel.numberOfLines = 0
+        progressLabel.textColor = Theme.textSecondary.withAlphaComponent(0.55)
+        progressLabel.font = .systemFont(ofSize: 14, weight: .regular)
+
+        activityLabel.numberOfLines = 0
+        activityLabel.textColor = Theme.textTertiary
+        activityLabel.font = .systemFont(ofSize: 12)
+
+        errorLabel.numberOfLines = 0
+        errorLabel.textColor = Theme.destructive
+        errorLabel.font = .systemFont(ofSize: 13)
+
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.axis = .vertical
+        stack.spacing = 6
+        stack.alignment = .fill
+        stack.addArrangedSubview(modelLabel)
+        stack.addArrangedSubview(progressLabel)
+        stack.addArrangedSubview(bodyLabel)
+        stack.addArrangedSubview(activityLabel)
+        stack.addArrangedSubview(errorLabel)
+        contentView.addSubview(stack)
 
         NSLayoutConstraint.activate([
-            mark.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
+            mark.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 10),
             mark.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
             mark.widthAnchor.constraint(equalToConstant: 18),
             mark.heightAnchor.constraint(equalToConstant: 18),
 
-            activityStack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
-            activityStack.leadingAnchor.constraint(equalTo: mark.trailingAnchor, constant: 12),
-            activityStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
-
-            bodyLabel.topAnchor.constraint(equalTo: activityStack.bottomAnchor, constant: 4),
-            bodyLabel.leadingAnchor.constraint(equalTo: activityStack.leadingAnchor),
-            bodyLabel.trailingAnchor.constraint(equalTo: activityStack.trailingAnchor),
-            bodyLabel.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -12),
-
-            caret.leadingAnchor.constraint(equalTo: bodyLabel.leadingAnchor),
-            caret.bottomAnchor.constraint(equalTo: bodyLabel.bottomAnchor, constant: -2),
-            caret.widthAnchor.constraint(equalToConstant: 2),
-            caret.heightAnchor.constraint(equalToConstant: 16)
+            stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
+            stack.leadingAnchor.constraint(equalTo: mark.trailingAnchor, constant: 10),
+            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -18),
+            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -10)
         ])
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        stopShimmer()
+    }
+
     func configure(with message: ChatMessage) {
         let font = AppSettings.shared.chatFont
 
-        activityStack.arrangedSubviews.forEach { view in
-            activityStack.removeArrangedSubview(view)
-            view.removeFromSuperview()
-        }
-        message.activity.forEach { note in
-            activityStack.addArrangedSubview(AssistantMessageCell.activityRow(note, font: font))
+        if let modelID = message.modelID {
+            let model = AIModel.model(for: modelID)
+            modelLabel.text = model.name.uppercased()
+            modelLabel.isHidden = false
+        } else {
+            modelLabel.isHidden = true
         }
 
-        if message.failed {
-            bodyLabel.attributedText = NSAttributedString(
-                string: message.text.isEmpty ? "Something went wrong." : message.text,
-                attributes: [
-                    .font: font.font(size: 16),
-                    .foregroundColor: Theme.destructive
-                ]
-            )
+        let trimmed = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            bodyLabel.isHidden = true
+            bodyLabel.attributedText = nil
         } else {
+            bodyLabel.isHidden = false
             bodyLabel.attributedText = Markdown.render(message.text, font: font)
         }
 
-        let streaming = message.isStreaming && !message.failed
-        caret.isHidden = !streaming
-        streaming ? startCaret() : stopCaret()
-        streaming && message.text.isEmpty ? mark.startSpinning() : mark.stopSpinning()
+        if message.isStreaming, let progress = message.progress, !progress.isEmpty, trimmed.isEmpty {
+            progressLabel.isHidden = false
+            progressLabel.text = progress
+            startShimmer()
+        } else {
+            progressLabel.isHidden = true
+            stopShimmer()
+        }
+
+        let notes = message.activity
+        if notes.isEmpty {
+            activityLabel.isHidden = true
+        } else {
+            activityLabel.isHidden = false
+            activityLabel.text = notes.map { "· " + $0.text }.joined(separator: "\n")
+        }
+
+        if message.failed {
+            errorLabel.isHidden = false
+            errorLabel.text = trimmed.isEmpty
+                ? "This request failed. Pull the message up to retry, or check Settings → Capabilities."
+                : nil
+            errorLabel.isHidden = errorLabel.text == nil
+        } else {
+            errorLabel.isHidden = true
+        }
+
+        mark.alpha = message.isStreaming ? 0.9 : 0.55
     }
 
-    private static func activityRow(_ note: ActivityNote, font: ChatFontChoice) -> UIView {
-        let row = UIStackView()
-        row.axis = .horizontal
-        row.spacing = 6
-        row.alignment = .center
-
-        let icon = UIImageView(image: UIImage(systemName: note.symbol))
-        icon.tintColor = Theme.textTertiary
-        icon.contentMode = .scaleAspectFit
-        icon.widthAnchor.constraint(equalToConstant: 13).isActive = true
-        icon.heightAnchor.constraint(equalToConstant: 13).isActive = true
-
-        let label = UILabel()
-        label.text = note.text
-        label.textColor = Theme.textTertiary
-        label.font = font.font(size: 13)
-
-        row.addArrangedSubview(icon)
-        row.addArrangedSubview(label)
-        return row
-    }
-
-    private func startCaret() {
+    private func startShimmer() {
+        guard shimmerTimer == nil else { return }
         guard !AppSettings.shared.motionReduced else {
-            caret.alpha = 1
+            progressLabel.alpha = 1
             return
         }
-        guard caret.layer.animation(forKey: "blink") == nil else { return }
-
-        let blink = CABasicAnimation(keyPath: "opacity")
-        blink.fromValue = 1
-        blink.toValue = 0.1
-        blink.duration = 0.55
-        blink.autoreverses = true
-        blink.repeatCount = .infinity
-        caret.layer.add(blink, forKey: "blink")
+        var goingDown = true
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.8, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            UIView.animate(withDuration: 0.75) {
+                self.progressLabel.alpha = goingDown ? 0.45 : 1.0
+            }
+            goingDown.toggle()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        shimmerTimer = timer
     }
 
-    private func stopCaret() {
-        caret.layer.removeAnimation(forKey: "blink")
-    }
-
-    override func prepareForReuse() {
-        super.prepareForReuse()
-        stopCaret()
-        mark.stopSpinning()
+    private func stopShimmer() {
+        shimmerTimer?.invalidate()
+        shimmerTimer = nil
+        progressLabel.alpha = 1
     }
 }

@@ -5,31 +5,30 @@ protocol ComposerViewDelegate: AnyObject {
     func composerDidTapStop()
     func composerDidTapPlus()
     func composerDidTapModel()
+    func composerDidTapSkills()
     func composerDidChangeMode(_ mode: ChatMode)
-    func composerDidTapVoiceMode()
     func composerHeightChanged()
     func composerNeedsPresenter() -> UIViewController
 }
 
-/// The Claude composer: rounded card, growing text view, `+` button, the
-/// Chat/Cowork pill, the model pill, dictation mic and the waveform button.
 final class ComposerView: UIView {
     weak var delegate: ComposerViewDelegate?
 
     private let card = UIView()
     private let textView = UITextView()
     private let placeholder = UILabel()
+
     private let plusButton = UIButton(type: .system)
+    private let skillsButton = UIButton(type: .system)
     private let modeButton = UIButton(type: .system)
     private let modelButton = UIButton(type: .system)
     private let micButton = UIButton(type: .system)
-    private let waveButton = UIButton(type: .system)
     private let sendButton = UIButton(type: .system)
+    private let levelView = UIProgressView(progressViewStyle: .bar)
 
     private let dictation = Dictation()
-    private var textHeight: NSLayoutConstraint!
-    private let minHeight: CGFloat = 24
-    private let maxHeight: CGFloat = 160
+    private var isDictating = false
+    private var heightConstraint: NSLayoutConstraint!
 
     private(set) var isStreaming = false
 
@@ -37,7 +36,7 @@ final class ComposerView: UIView {
         get { textView.text ?? "" }
         set {
             textView.text = newValue
-            refreshState()
+            updatePlaceholder()
             recalculateHeight()
         }
     }
@@ -45,287 +44,296 @@ final class ComposerView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         build()
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        build()
-    }
-
-    // MARK: - Construction
-
-    private func build() {
-        backgroundColor = .clear
-
-        card.backgroundColor = Theme.composer
-        card.layer.cornerRadius = 24
-        card.layer.borderWidth = 1
-        card.layer.borderColor = Theme.border.cgColor
-        card.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(card)
-
-        textView.backgroundColor = .clear
-        textView.textColor = Theme.textPrimary
-        textView.font = AppSettings.shared.chatFont.bodyFont()
-        textView.delegate = self
-        textView.isScrollEnabled = false
-        textView.textContainerInset = .zero
-        textView.textContainer.lineFragmentPadding = 0
-        textView.keyboardAppearance = .dark
-        textView.translatesAutoresizingMaskIntoConstraints = false
-        card.addSubview(textView)
-
-        placeholder.text = "Type / for skills"
-        placeholder.textColor = Theme.textTertiary
-        placeholder.font = AppSettings.shared.chatFont.bodyFont()
-        placeholder.translatesAutoresizingMaskIntoConstraints = false
-        card.addSubview(placeholder)
-
-        configureIconButton(plusButton, symbol: "plus", action: #selector(plusTapped))
-        configureIconButton(micButton, symbol: "mic", action: #selector(micTapped))
-        configureIconButton(waveButton, symbol: "waveform", action: #selector(waveTapped))
-
-        sendButton.setImage(UIImage(systemName: "arrow.up"), for: .normal)
-        sendButton.tintColor = Theme.background
-        sendButton.backgroundColor = Theme.accent
-        sendButton.layer.cornerRadius = 15
-        sendButton.translatesAutoresizingMaskIntoConstraints = false
-        sendButton.addTarget(self, action: #selector(sendTapped), for: .touchUpInside)
-        card.addSubview(sendButton)
-
-        configurePill(modeButton, action: #selector(modeTapped))
-        configurePill(modelButton, action: #selector(modelTapped))
-
-        textHeight = textView.heightAnchor.constraint(equalToConstant: minHeight)
-
-        NSLayoutConstraint.activate([
-            card.topAnchor.constraint(equalTo: topAnchor),
-            card.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            card.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            card.bottomAnchor.constraint(equalTo: bottomAnchor),
-
-            textView.topAnchor.constraint(equalTo: card.topAnchor, constant: 16),
-            textView.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 18),
-            textView.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -18),
-            textHeight,
-
-            placeholder.leadingAnchor.constraint(equalTo: textView.leadingAnchor),
-            placeholder.topAnchor.constraint(equalTo: textView.topAnchor),
-
-            plusButton.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 14),
-            plusButton.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -12),
-            plusButton.widthAnchor.constraint(equalToConstant: 30),
-            plusButton.heightAnchor.constraint(equalToConstant: 30),
-
-            modeButton.leadingAnchor.constraint(equalTo: plusButton.trailingAnchor, constant: 8),
-            modeButton.centerYAnchor.constraint(equalTo: plusButton.centerYAnchor),
-            modeButton.heightAnchor.constraint(equalToConstant: 30),
-
-            modelButton.leadingAnchor.constraint(equalTo: modeButton.trailingAnchor, constant: 8),
-            modelButton.centerYAnchor.constraint(equalTo: plusButton.centerYAnchor),
-            modelButton.heightAnchor.constraint(equalToConstant: 30),
-
-            sendButton.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -14),
-            sendButton.centerYAnchor.constraint(equalTo: plusButton.centerYAnchor),
-            sendButton.widthAnchor.constraint(equalToConstant: 30),
-            sendButton.heightAnchor.constraint(equalToConstant: 30),
-
-            waveButton.trailingAnchor.constraint(equalTo: sendButton.leadingAnchor, constant: -10),
-            waveButton.centerYAnchor.constraint(equalTo: plusButton.centerYAnchor),
-            waveButton.widthAnchor.constraint(equalToConstant: 26),
-            waveButton.heightAnchor.constraint(equalToConstant: 26),
-
-            micButton.trailingAnchor.constraint(equalTo: waveButton.leadingAnchor, constant: -12),
-            micButton.centerYAnchor.constraint(equalTo: plusButton.centerYAnchor),
-            micButton.widthAnchor.constraint(equalToConstant: 26),
-            micButton.heightAnchor.constraint(equalToConstant: 26),
-
-            textView.bottomAnchor.constraint(equalTo: plusButton.topAnchor, constant: -12)
-        ])
-
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(settingsChanged),
             name: AppSettings.didChangeNotification,
             object: nil
         )
+    }
 
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    // MARK: - Build
+
+    private func build() {
+        backgroundColor = .clear
+
+        card.translatesAutoresizingMaskIntoConstraints = false
+        card.backgroundColor = Theme.composer
+        card.layer.cornerRadius = 24
+        card.layer.cornerCurve = .continuous
+        card.layer.borderWidth = 1
+        card.layer.borderColor = Theme.border.cgColor
+        addSubview(card)
+
+        textView.translatesAutoresizingMaskIntoConstraints = false
+        textView.backgroundColor = .clear
+        textView.textColor = Theme.textPrimary
+        textView.tintColor = Theme.accent
+        textView.delegate = self
+        textView.isScrollEnabled = false
+        textView.keyboardAppearance = .dark
+        textView.textContainerInset = .zero
+        textView.textContainer.lineFragmentPadding = 0
+        textView.returnKeyType = AppSettings.shared.sendOnReturn ? .send : .default
+        card.addSubview(textView)
+
+        placeholder.translatesAutoresizingMaskIntoConstraints = false
+        placeholder.text = "Type / for skills"
+        placeholder.textColor = Theme.textTertiary
+        card.addSubview(placeholder)
+
+        configureIcon(plusButton, systemName: "plus", action: #selector(plusTapped))
+        configureIcon(skillsButton, systemName: "square.grid.2x2", action: #selector(skillsTapped))
+        configureIcon(micButton, systemName: "mic", action: #selector(micTapped))
+
+        modeButton.translatesAutoresizingMaskIntoConstraints = false
+        modeButton.backgroundColor = Theme.surfaceRaised
+        modeButton.layer.cornerRadius = 15
+        modeButton.contentEdgeInsets = UIEdgeInsets(top: 6, left: 12, bottom: 6, right: 12)
+        modeButton.setTitleColor(Theme.textSecondary, for: .normal)
+        modeButton.titleLabel?.font = .systemFont(ofSize: 13, weight: .medium)
+        modeButton.addTarget(self, action: #selector(modeTapped), for: .touchUpInside)
+        card.addSubview(modeButton)
+
+        modelButton.translatesAutoresizingMaskIntoConstraints = false
+        modelButton.backgroundColor = .clear
+        modelButton.contentEdgeInsets = UIEdgeInsets(top: 6, left: 4, bottom: 6, right: 8)
+        modelButton.setTitleColor(Theme.textSecondary, for: .normal)
+        modelButton.titleLabel?.font = .systemFont(ofSize: 13, weight: .medium)
+        modelButton.imageEdgeInsets = UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 6)
+        modelButton.titleEdgeInsets = UIEdgeInsets(top: 0, left: 6, bottom: 0, right: 0)
+        modelButton.addTarget(self, action: #selector(modelTapped), for: .touchUpInside)
+        card.addSubview(modelButton)
+
+        sendButton.translatesAutoresizingMaskIntoConstraints = false
+        sendButton.backgroundColor = Theme.accent
+        sendButton.tintColor = UIColor(hex: 0x1A1A19)
+        sendButton.layer.cornerRadius = 17
+        sendButton.setImage(UIImage(systemName: "arrow.up"), for: .normal)
+        sendButton.addTarget(self, action: #selector(sendTapped), for: .touchUpInside)
+        card.addSubview(sendButton)
+
+        levelView.translatesAutoresizingMaskIntoConstraints = false
+        levelView.progressTintColor = Theme.accent
+        levelView.trackTintColor = Theme.border
+        levelView.isHidden = true
+        card.addSubview(levelView)
+
+        heightConstraint = textView.heightAnchor.constraint(equalToConstant: 22)
+
+        NSLayoutConstraint.activate([
+            card.topAnchor.constraint(equalTo: topAnchor),
+            card.bottomAnchor.constraint(equalTo: bottomAnchor),
+            card.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            card.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+
+            textView.topAnchor.constraint(equalTo: card.topAnchor, constant: 14),
+            textView.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 18),
+            textView.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -18),
+            heightConstraint,
+
+            placeholder.leadingAnchor.constraint(equalTo: textView.leadingAnchor),
+            placeholder.topAnchor.constraint(equalTo: textView.topAnchor),
+
+            levelView.topAnchor.constraint(equalTo: textView.bottomAnchor, constant: 8),
+            levelView.leadingAnchor.constraint(equalTo: textView.leadingAnchor),
+            levelView.trailingAnchor.constraint(equalTo: textView.trailingAnchor),
+            levelView.heightAnchor.constraint(equalToConstant: 2),
+
+            plusButton.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 12),
+            plusButton.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -10),
+            plusButton.widthAnchor.constraint(equalToConstant: 34),
+            plusButton.heightAnchor.constraint(equalToConstant: 34),
+
+            skillsButton.leadingAnchor.constraint(equalTo: plusButton.trailingAnchor, constant: 2),
+            skillsButton.centerYAnchor.constraint(equalTo: plusButton.centerYAnchor),
+            skillsButton.widthAnchor.constraint(equalToConstant: 34),
+            skillsButton.heightAnchor.constraint(equalToConstant: 34),
+
+            modeButton.leadingAnchor.constraint(equalTo: skillsButton.trailingAnchor, constant: 4),
+            modeButton.centerYAnchor.constraint(equalTo: plusButton.centerYAnchor),
+
+            modelButton.leadingAnchor.constraint(equalTo: modeButton.trailingAnchor, constant: 2),
+            modelButton.centerYAnchor.constraint(equalTo: plusButton.centerYAnchor),
+            modelButton.trailingAnchor.constraint(lessThanOrEqualTo: micButton.leadingAnchor, constant: -4),
+
+            micButton.trailingAnchor.constraint(equalTo: sendButton.leadingAnchor, constant: -2),
+            micButton.centerYAnchor.constraint(equalTo: plusButton.centerYAnchor),
+            micButton.widthAnchor.constraint(equalToConstant: 34),
+            micButton.heightAnchor.constraint(equalToConstant: 34),
+
+            sendButton.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -12),
+            sendButton.centerYAnchor.constraint(equalTo: plusButton.centerYAnchor),
+            sendButton.widthAnchor.constraint(equalToConstant: 34),
+            sendButton.heightAnchor.constraint(equalToConstant: 34),
+
+            plusButton.topAnchor.constraint(greaterThanOrEqualTo: levelView.bottomAnchor, constant: 6)
+        ])
+
+        modelButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         refreshLabels()
-        refreshState()
+        updatePlaceholder()
     }
 
-    private func configureIconButton(_ button: UIButton, symbol: String, action: Selector) {
-        button.setImage(UIImage(systemName: symbol), for: .normal)
+    private func configureIcon(_ button: UIButton, systemName: String, action: Selector) {
+        button.translatesAutoresizingMaskIntoConstraints = false
         button.tintColor = Theme.textSecondary
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.addTarget(self, action: action, for: .touchUpInside)
-        card.addSubview(button)
-    }
-
-    private func configurePill(_ button: UIButton, action: Selector) {
-        button.setTitleColor(Theme.textSecondary, for: .normal)
-        button.titleLabel?.font = AppSettings.shared.chatFont.font(size: 13)
-        button.backgroundColor = Theme.surfaceRaised
-        button.layer.cornerRadius = 15
-        button.contentEdgeInsets = UIEdgeInsets(top: 0, left: 12, bottom: 0, right: 12)
-        button.translatesAutoresizingMaskIntoConstraints = false
+        button.setImage(UIImage(systemName: systemName), for: .normal)
         button.addTarget(self, action: action, for: .touchUpInside)
         card.addSubview(button)
     }
 
     // MARK: - State
 
-    func setStreaming(_ streaming: Bool) {
-        isStreaming = streaming
-        refreshState()
-    }
-
-    private func refreshState() {
-        placeholder.isHidden = !(textView.text ?? "").isEmpty
-
-        if isStreaming {
-            sendButton.setImage(UIImage(systemName: "stop.fill"), for: .normal)
-            sendButton.backgroundColor = Theme.surfaceRaised
-            sendButton.tintColor = Theme.textPrimary
-            sendButton.isEnabled = true
-            return
-        }
-
-        let hasText = !(textView.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        sendButton.setImage(UIImage(systemName: "arrow.up"), for: .normal)
-        sendButton.tintColor = hasText ? Theme.background : Theme.textTertiary
-        sendButton.backgroundColor = hasText ? Theme.accent : Theme.surfaceRaised
-        sendButton.isEnabled = hasText
-    }
-
     func refreshLabels() {
         let settings = AppSettings.shared
+        let model = settings.selectedModel
+
         modeButton.setTitle(settings.mode.title, for: .normal)
-        modelButton.setTitle(settings.selectedModel.name + "  " + settings.selectedModel.effort, for: .normal)
+
+        let effortSuffix = model.supportsEffort ? "  " + settings.effort.title : ""
+        modelButton.setTitle(model.name + effortSuffix, for: .normal)
+        modelButton.setImage(ProviderMark.image(for: model.provider, size: 16), for: .normal)
 
         textView.font = settings.chatFont.bodyFont()
         placeholder.font = settings.chatFont.bodyFont()
-        modeButton.titleLabel?.font = settings.chatFont.font(size: 13)
-        modelButton.titleLabel?.font = settings.chatFont.font(size: 13)
-
-        modeButton.setTitleColor(
-            settings.mode == .cowork ? Theme.accent : Theme.textSecondary,
-            for: .normal
-        )
+        textView.returnKeyType = settings.sendOnReturn ? .send : .default
+        recalculateHeight()
     }
 
     @objc private func settingsChanged() {
         refreshLabels()
-        recalculateHeight()
+    }
+
+    func setStreaming(_ streaming: Bool) {
+        isStreaming = streaming
+        let image = streaming ? "stop.fill" : "arrow.up"
+        sendButton.setImage(UIImage(systemName: image), for: .normal)
+        sendButton.backgroundColor = streaming ? Theme.surfaceRaised : Theme.accent
+        sendButton.tintColor = streaming ? Theme.textPrimary : UIColor(hex: 0x1A1A19)
+    }
+
+    private func updatePlaceholder() {
+        placeholder.isHidden = !(textView.text ?? "").isEmpty
     }
 
     private func recalculateHeight() {
-        let width = textView.bounds.width
-        guard width > 0 else { return }
-
+        let width = max(textView.bounds.width, 1)
         let size = textView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
-        let clamped = min(maxHeight, max(minHeight, size.height))
-
-        guard abs(clamped - textHeight.constant) > 0.5 else { return }
-        textHeight.constant = clamped
-        textView.isScrollEnabled = clamped >= maxHeight
+        let clamped = min(max(size.height, 22), 150)
+        guard abs(clamped - heightConstraint.constant) > 0.5 else { return }
+        heightConstraint.constant = clamped
+        textView.isScrollEnabled = clamped >= 150
         delegate?.composerHeightChanged()
     }
 
     // MARK: - Actions
 
-    @objc private func sendTapped() {
-        if isStreaming {
-            Haptics.tap()
-            delegate?.composerDidTapStop()
-            return
-        }
-
-        let value = (textView.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty else { return }
-
-        Haptics.tap()
-        textView.text = ""
-        refreshState()
-        recalculateHeight()
-        delegate?.composerDidSend(value)
-    }
-
     @objc private func plusTapped() {
-        Haptics.tap()
+        Feedback.tap()
         delegate?.composerDidTapPlus()
     }
 
+    @objc private func skillsTapped() {
+        Feedback.tap()
+        delegate?.composerDidTapSkills()
+    }
+
     @objc private func modelTapped() {
-        Haptics.tap()
+        Feedback.tap()
         delegate?.composerDidTapModel()
     }
 
-    @objc private func waveTapped() {
-        Haptics.tap()
-        delegate?.composerDidTapVoiceMode()
-    }
-
     @objc private func modeTapped() {
-        Haptics.tap()
+        Feedback.selection()
         let next: ChatMode = AppSettings.shared.mode == .chat ? .cowork : .chat
         AppSettings.shared.mode = next
         refreshLabels()
         delegate?.composerDidChangeMode(next)
     }
 
+    @objc private func sendTapped() {
+        if isStreaming {
+            Feedback.warning()
+            delegate?.composerDidTapStop()
+            return
+        }
+        let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else {
+            Feedback.tick()
+            return
+        }
+        Feedback.send()
+        stopDictation()
+        text = ""
+        delegate?.composerDidSend(value)
+    }
+
     @objc private func micTapped() {
-        if dictation.isRecording {
-            dictation.stop()
-            micButton.tintColor = Theme.textSecondary
-            micButton.transform = .identity
+        if isDictating {
+            Feedback.tap()
+            stopDictation()
             return
         }
 
-        Haptics.tap()
+        Feedback.tap()
+        isDictating = true
         micButton.tintColor = Theme.accent
+        micButton.setImage(UIImage(systemName: "mic.fill"), for: .normal)
+        levelView.isHidden = false
 
         dictation.start(
             onTranscript: { [weak self] transcript in
-                self?.text = transcript
+                guard let self = self else { return }
+                self.text = transcript
             },
             onLevel: { [weak self] level in
-                guard let self = self, !AppSettings.shared.motionReduced else { return }
-                let scale = 1 + CGFloat(level) * 0.35
-                self.micButton.transform = CGAffineTransform(scaleX: scale, y: scale)
+                self?.levelView.setProgress(min(max(level, 0), 1), animated: false)
             },
             onError: { [weak self] error in
                 guard let self = self else { return }
-                self.micButton.tintColor = Theme.textSecondary
-                self.micButton.transform = .identity
-                Haptics.warning()
-
+                self.stopDictation()
+                Feedback.error()
                 let alert = UIAlertController(
                     title: "Dictation unavailable",
                     message: error.localizedDescription,
                     preferredStyle: .alert
                 )
-                alert.addAction(UIAlertAction(title: "OK", style: .default, handler: nil))
-                self.delegate?.composerNeedsPresenter().present(alert, animated: true, completion: nil)
+                alert.addAction(UIAlertAction(title: "OK", style: .default))
+                self.delegate?.composerNeedsPresenter().present(alert, animated: true)
             }
         )
     }
 
     func stopDictation() {
+        guard isDictating else { return }
+        isDictating = false
         dictation.stop()
         micButton.tintColor = Theme.textSecondary
-        micButton.transform = .identity
+        micButton.setImage(UIImage(systemName: "mic"), for: .normal)
+        levelView.isHidden = true
+        levelView.setProgress(0, animated: false)
     }
 
-    override func becomeFirstResponder() -> Bool {
-        textView.becomeFirstResponder()
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        recalculateHeight()
     }
 }
 
 extension ComposerView: UITextViewDelegate {
     func textViewDidChange(_ textView: UITextView) {
-        refreshState()
+        updatePlaceholder()
         recalculateHeight()
+        Feedback.tick()
+
+        if textView.text == "/" {
+            textView.text = ""
+            updatePlaceholder()
+            delegate?.composerDidTapSkills()
+        }
     }
 
     func textView(

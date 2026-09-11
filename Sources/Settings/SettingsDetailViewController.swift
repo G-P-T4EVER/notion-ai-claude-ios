@@ -1,10 +1,8 @@
 import UIKit
-import SafariServices
 
-/// One detail pane per settings section.
 final class SettingsDetailViewController: UIViewController {
     private let section: SettingsSection
-    private let table = UITableView(frame: .zero, style: .grouped)
+    private let tableView = UITableView(frame: .zero, style: .insetGrouped)
     private var blocks: [SettingsBlock] = []
 
     init(section: SettingsSection) {
@@ -16,36 +14,72 @@ final class SettingsDetailViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = section.title
         view.backgroundColor = Theme.background
+        title = section.title
 
-        table.backgroundColor = Theme.background
-        table.separatorColor = Theme.border
-        table.dataSource = self
-        table.delegate = self
-        table.estimatedRowHeight = 54
-        table.rowHeight = UITableView.automaticDimension
-        table.register(UITableViewCell.self, forCellReuseIdentifier: "DetailRow")
-        view.addSubview(table)
-        table.pinEdges(to: view)
+        if embedChildIfNeeded() { return }
+
+        tableView.translatesAutoresizingMaskIntoConstraints = false
+        tableView.backgroundColor = Theme.background
+        tableView.separatorColor = Theme.border
+        tableView.dataSource = self
+        tableView.delegate = self
+        tableView.rowHeight = UITableView.automaticDimension
+        tableView.estimatedRowHeight = 56
+        view.addSubview(tableView)
+        tableView.pinEdges(to: view)
 
         if section == .reflect {
             let header = ReflectHeaderView(
-                frame: CGRect(x: 0, y: 0, width: view.bounds.width, height: 330)
+                frame: CGRect(x: 0, y: 0, width: view.bounds.width, height: 430)
             )
-            header.reload()
-            table.tableHeaderView = header
+            tableView.tableHeaderView = header
         }
 
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(rebuild),
+            name: NotionSession.didChangeNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(rebuild),
+            name: LibraryStore.didChangeNotification,
+            object: nil
+        )
+
         rebuild()
+        if section == .account { refreshProfile(silent: true) }
     }
 
-    private func rebuild() {
-        blocks = makeBlocks()
-        table.reloadData()
+    /// Sections that are full screens of their own are embedded as children so
+    /// the settings list keeps one push style everywhere.
+    private func embedChildIfNeeded() -> Bool {
+        let child: UIViewController?
+        switch section {
+        case .agents: child = AgentsViewController()
+        case .skills: child = SkillsViewController(pickMode: false)
+        case .connectors: child = ConnectorsViewController()
+        default: child = nil
+        }
+        guard let controller = child else { return false }
+
+        addChild(controller)
+        controller.view.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(controller.view)
+        controller.view.pinEdges(to: view)
+        controller.didMove(toParent: self)
+        navigationItem.rightBarButtonItem = controller.navigationItem.rightBarButtonItem
+        return true
     }
 
     // MARK: - Content
+
+    @objc private func rebuild() {
+        blocks = makeBlocks()
+        tableView.reloadData()
+    }
 
     private func makeBlocks() -> [SettingsBlock] {
         let settings = AppSettings.shared
@@ -55,47 +89,49 @@ final class SettingsDetailViewController: UIViewController {
             let fontRows = ChatFontChoice.allCases.map { choice in
                 SettingsRow(
                     title: choice.title,
+                    subtitle: nil,
                     accessory: .checkmark(settings.chatFont == choice),
                     action: { [weak self] in
-                        AppSettings.shared.chatFont = choice
+                        settings.chatFont = choice
+                        Feedback.selection()
+                        self?.rebuild()
+                    }
+                )
+            }
+
+            let hapticRows = HapticStrength.allCases.map { strength in
+                SettingsRow(
+                    title: strength.title,
+                    subtitle: strength.detail,
+                    accessory: .checkmark(settings.hapticStrength == strength),
+                    action: { [weak self] in
+                        settings.hapticStrength = strength
+                        Feedback.success()
                         self?.rebuild()
                     }
                 )
             }
 
             return [
-                SettingsBlock(header: "Chat font", footer: nil, rows: fontRows),
-                SettingsBlock(
-                    header: "Motion",
-                    footer: "Reduce animation in streaming responses and other interface elements.",
-                    rows: [
-                        SettingsRow(
-                            title: "Reduce animation",
-                            accessory: .toggle(settings.reduceMotion) { value in
-                                AppSettings.shared.reduceMotion = value
-                            }
-                        )
-                    ]
-                ),
-                SettingsBlock(header: "Composer", footer: nil, rows: [
+                SettingsBlock(header: "CHAT FONT", footer: nil, rows: fontRows),
+                SettingsBlock(header: "MOTION", footer: "Turn motion off to remove sidebar and streaming animations.", rows: [
                     SettingsRow(
-                        title: "Send with Return",
-                        accessory: .toggle(settings.sendOnReturn) { value in
-                            AppSettings.shared.sendOnReturn = value
+                        title: "Motion",
+                        subtitle: nil,
+                        accessory: .toggle(!settings.reduceMotion) { isOn in
+                            settings.reduceMotion = !isOn
+                            Feedback.toggle(isOn)
                         }
-                    ),
+                    )
+                ]),
+                SettingsBlock(header: "HAPTICS", footer: "Haptic feedback fires on sends, toggles, model changes and sheet transitions.", rows: hapticRows),
+                SettingsBlock(header: "COMPOSER", footer: nil, rows: [
                     SettingsRow(
-                        title: "Haptics",
-                        accessory: .toggle(settings.hapticsEnabled) { value in
-                            AppSettings.shared.hapticsEnabled = value
-                        }
-                    ),
-                    SettingsRow(
-                        title: "Default mode",
-                        accessory: .value(settings.mode.title),
-                        action: { [weak self] in
-                            AppSettings.shared.mode = settings.mode == .chat ? .cowork : .chat
-                            self?.rebuild()
+                        title: "Return key sends",
+                        subtitle: nil,
+                        accessory: .toggle(settings.sendOnReturn) { isOn in
+                            settings.sendOnReturn = isOn
+                            Feedback.toggle(isOn)
                         }
                     )
                 ])
@@ -103,114 +139,108 @@ final class SettingsDetailViewController: UIViewController {
 
         case .account:
             let session = NotionSession.shared
+            let name = session.userName?.isEmpty == false ? session.userName! : "Loading…"
+            let email = session.userEmail?.isEmpty == false ? session.userEmail! : "Loading…"
+            let space = session.spaceName?.isEmpty == false ? session.spaceName! : "Loading…"
+
             return [
-                SettingsBlock(header: "Signed in", footer: nil, rows: [
-                    SettingsRow(title: "Name", accessory: .value(session.userName ?? "Unknown")),
-                    SettingsRow(title: "Email", accessory: .value(session.userEmail ?? "Unknown")),
-                    SettingsRow(title: "Workspace", accessory: .value(session.spaceName ?? "Unknown"))
+                SettingsBlock(header: "SIGNED IN AS", footer: "Details come from your Notion account, so they change when you switch workspace.", rows: [
+                    SettingsRow(title: "Name", subtitle: nil, accessory: .value(name)),
+                    SettingsRow(title: "Email", subtitle: nil, accessory: .value(email)),
+                    SettingsRow(title: "Workspace", subtitle: nil, accessory: .value(space)),
+                    SettingsRow(title: "Refresh details", subtitle: nil, accessory: .disclosure, action: { [weak self] in
+                        self?.refreshProfile(silent: false)
+                    }),
+                    SettingsRow(title: "Switch workspace", subtitle: nil, accessory: .disclosure, action: { [weak self] in
+                        self?.presentSwitcher()
+                    })
                 ]),
                 SettingsBlock(header: nil, footer: nil, rows: [
-                    SettingsRow(
-                        title: "Open account settings on notion.so",
-                        accessory: .disclosure,
-                        action: { [weak self] in self?.openWeb("/my-settings") }
-                    ),
-                    SettingsRow(
-                        title: "Sign out",
-                        destructive: true,
-                        action: { [weak self] in self?.confirmSignOut() }
-                    )
+                    SettingsRow(title: "Sign out", subtitle: nil, destructive: true, action: { [weak self] in
+                        self?.confirmSignOut()
+                    })
                 ])
             ]
 
         case .privacy:
             return [
-                SettingsBlock(
-                    header: "Usage",
-                    footer: "This client never sends data anywhere except Notion's own servers.",
-                    rows: [
-                        SettingsRow(
-                            title: "Opt out of usage analytics",
-                            accessory: .toggle(settings.analyticsOptOut) { value in
-                                AppSettings.shared.analyticsOptOut = value
-                            }
-                        )
-                    ]
-                ),
-                SettingsBlock(header: "Local data", footer: "Chat history is stored only on this device.", rows: [
+                SettingsBlock(header: "DATA", footer: "Chats, skills, agents and imported memories live only on this device.", rows: [
                     SettingsRow(
-                        title: "Delete all chats",
-                        destructive: true,
-                        action: { [weak self] in self?.confirmDeleteChats() }
+                        title: "Share usage analytics",
+                        subtitle: nil,
+                        accessory: .toggle(!settings.analyticsOptOut) { isOn in
+                            settings.analyticsOptOut = !isOn
+                            Feedback.toggle(isOn)
+                        }
                     )
+                ]),
+                SettingsBlock(header: nil, footer: nil, rows: [
+                    SettingsRow(title: "Delete all chats", subtitle: nil, destructive: true, action: { [weak self] in
+                        self?.confirmDeleteChats()
+                    })
                 ])
             ]
 
         case .billing:
+            let plans = PlanTier.allCases.map { tier in
+                SettingsRow(
+                    title: tier.title,
+                    subtitle: AIModel.models(in: tier).map { $0.name }.joined(separator: ", "),
+                    accessory: .none
+                )
+            }
             return [
-                SettingsBlock(header: nil, footer: "Plans and invoices are managed by Notion.", rows: [
-                    SettingsRow(
-                        title: "Manage plan",
-                        accessory: .disclosure,
-                        action: { [weak self] in self?.openWeb("/settings/billing") }
-                    )
+                SettingsBlock(header: "MODELS BY PLAN", footer: "Model availability follows your Notion plan. If a model is not in your plan, Notion AI answers with your plan's best model instead.", rows: plans),
+                SettingsBlock(header: nil, footer: nil, rows: [
+                    SettingsRow(title: "Manage plan in Notion", subtitle: nil, accessory: .disclosure, action: {
+                        guard let url = URL(string: NotionEndpoints.host + "/settings/plans") else { return }
+                        Feedback.tap()
+                        UIApplication.shared.open(url)
+                    })
                 ])
             ]
 
         case .capabilities:
-            let modelRows = AIModel.all.map { model in
-                SettingsRow(
-                    title: model.name,
-                    subtitle: model.effort,
-                    accessory: .checkmark(settings.selectedModel == model),
-                    action: { [weak self] in
-                        AppSettings.shared.selectedModel = model
-                        self?.rebuild()
-                    }
-                )
-            }
-
             return [
-                SettingsBlock(header: "Model", footer: nil, rows: modelRows),
-                SettingsBlock(
-                    header: "Advanced",
-                    footer: "Notion's AI endpoint is not public. If a server change breaks replies, set the new path here instead of waiting for a new build.",
-                    rows: [
-                        SettingsRow(
-                            title: "AI endpoint path",
-                            accessory: .value(settings.aiEndpointPath),
-                            action: { [weak self] in self?.editEndpoint() }
-                        )
-                    ]
-                )
-            ]
-
-        case .memory:
-            return [
-                SettingsBlock(
-                    header: nil,
-                    footer: "When on, recent chats from this device are used as context for new answers.",
-                    rows: [
-                        SettingsRow(
-                            title: "Use chat memory",
-                            accessory: .toggle(settings.memoryEnabled) { value in
-                                AppSettings.shared.memoryEnabled = value
-                            }
-                        )
-                    ]
-                )
-            ]
-
-        case .reflect:
-            return [
-                SettingsBlock(header: nil, footer: "Computed on device from your local chat history.", rows: [
+                SettingsBlock(header: "MODEL", footer: nil, rows: [
                     SettingsRow(
-                        title: "Decide when Notion AI is off",
+                        title: "Model",
+                        subtitle: settings.selectedModel.blurb,
+                        accessory: .value(settings.selectedModel.name),
+                        action: { [weak self] in self?.presentModelPicker() }
+                    ),
+                    SettingsRow(
+                        title: "Effort",
+                        subtitle: settings.effort.detail,
+                        accessory: .value(settings.effort.title),
+                        action: { [weak self] in self?.presentModelPicker() }
+                    )
+                ]),
+                SettingsBlock(header: "AI ENDPOINT", footer: "Notion's AI endpoint is private and changes over time. If answers stop arriving, try another path.", rows: [
+                    SettingsRow(
+                        title: "Endpoint path",
+                        subtitle: "api/v3/" + settings.aiEndpointPath,
+                        accessory: .disclosure,
+                        action: { [weak self] in self?.editEndpoint() }
+                    )
+                ]),
+                SettingsBlock(header: "DIAGNOSTICS", footer: settings.lastRequestInfo.isEmpty ? nil : "Last request: " + settings.lastRequestInfo, rows: [
+                    SettingsRow(
+                        title: "Verbose diagnostics",
+                        subtitle: nil,
+                        accessory: .toggle(settings.diagnosticsEnabled) { isOn in
+                            settings.diagnosticsEnabled = isOn
+                            Feedback.toggle(isOn)
+                        }
+                    ),
+                    SettingsRow(
+                        title: "Last response",
+                        subtitle: settings.lastRawResponse.isEmpty ? "Nothing captured yet" : "Raw payload from Notion",
                         accessory: .disclosure,
                         action: { [weak self] in
-                            guard let self = self else { return }
-                            self.navigationController?.pushViewController(
-                                SettingsDetailViewController(section: .timeAndFocus),
+                            Feedback.tap()
+                            self?.navigationController?.pushViewController(
+                                RawResponseViewController(),
                                 animated: true
                             )
                         }
@@ -218,118 +248,159 @@ final class SettingsDetailViewController: UIViewController {
                 ])
             ]
 
+        case .memory:
+            let store = LibraryStore.shared
+            let sources = store.memorySources()
+                .map { "\($0.source) · \($0.count)" }
+                .joined(separator: "\n")
+
+            return [
+                SettingsBlock(header: "MEMORY", footer: "Stored facts are attached to every request so answers stay consistent.", rows: [
+                    SettingsRow(
+                        title: "Use memory",
+                        subtitle: nil,
+                        accessory: .toggle(settings.memoryEnabled) { isOn in
+                            settings.memoryEnabled = isOn
+                            Feedback.toggle(isOn)
+                        }
+                    ),
+                    SettingsRow(
+                        title: "Stored facts",
+                        subtitle: sources.isEmpty ? nil : sources,
+                        accessory: .value("\(store.memories.count)")
+                    )
+                ]),
+                SettingsBlock(header: "IMPORT", footer: "Bring memory over from ChatGPT, Claude, Gemini or Grok exports.", rows: [
+                    SettingsRow(title: "Import from another assistant", subtitle: nil, accessory: .disclosure, action: { [weak self] in
+                        Feedback.tap()
+                        self?.navigationController?.pushViewController(
+                            SettingsDetailViewController(section: .connectors),
+                            animated: true
+                        )
+                    }),
+                    SettingsRow(title: "Add a fact manually", subtitle: nil, accessory: .disclosure, action: { [weak self] in
+                        self?.addMemory()
+                    })
+                ]),
+                SettingsBlock(header: nil, footer: nil, rows: [
+                    SettingsRow(title: "Clear memory", subtitle: nil, destructive: true, action: {
+                        LibraryStore.shared.clearMemories()
+                        Feedback.warning()
+                    })
+                ])
+            ]
+
+        case .reflect:
+            return []
+
         case .timeAndFocus:
             return [
-                SettingsBlock(
-                    header: "Quiet hours",
-                    footer: "During quiet hours the app stops nudging you and starts in read-only mode.",
-                    rows: [
-                        SettingsRow(
-                            title: "Enable quiet hours",
-                            accessory: .toggle(settings.quietHoursEnabled) { [weak self] value in
-                                AppSettings.shared.quietHoursEnabled = value
-                                self?.rebuild()
-                            }
-                        ),
-                        SettingsRow(
-                            title: "Starts at",
-                            accessory: .value(SettingsDetailViewController.hourLabel(settings.quietHoursStart)),
-                            action: { [weak self] in self?.editHour(isStart: true) }
-                        ),
-                        SettingsRow(
-                            title: "Ends at",
-                            accessory: .value(SettingsDetailViewController.hourLabel(settings.quietHoursEnd)),
-                            action: { [weak self] in self?.editHour(isStart: false) }
-                        ),
-                        SettingsRow(
-                            title: "Right now",
-                            accessory: .value(settings.isQuietTimeNow ? "Quiet" : "Active")
-                        )
-                    ]
-                )
-            ]
-
-        case .claudeCode:
-            return [
-                SettingsBlock(
-                    header: nil,
-                    footer: "Claude Code is a desktop and terminal feature. This screen exists so the settings tree matches the desktop client.",
-                    rows: [
-                        SettingsRow(title: "Status", accessory: .value("Not available on iOS"))
-                    ]
-                )
-            ]
-
-        case .skills:
-            let skills: [(String, String)] = [
-                ("Summarize a page", "Summarize this Notion page in five bullets: "),
-                ("Draft a doc", "Draft a Notion doc about "),
-                ("Rewrite", "Rewrite the following text to be clearer: "),
-                ("Translate", "Translate the following into Russian: "),
-                ("Action items", "Pull the action items out of this: "),
-                ("Meeting recap", "Write a recap of this meeting: ")
-            ]
-
-            return [
-                SettingsBlock(
-                    header: "Skills",
-                    footer: "Type / in the composer to reach these quickly.",
-                    rows: skills.map { skill in
-                        SettingsRow(
-                            title: skill.0,
-                            accessory: .disclosure,
-                            action: {
-                                RootController.current?.prefillComposer(with: skill.1)
-                            }
-                        )
-                    }
-                )
-            ]
-
-        case .connectors:
-            return [
-                SettingsBlock(
-                    header: nil,
-                    footer: "Connectors are configured in your Notion workspace and apply automatically here.",
-                    rows: [
-                        SettingsRow(
-                            title: "Manage connections",
-                            accessory: .disclosure,
-                            action: { [weak self] in self?.openWeb("/settings/connections") }
-                        )
-                    ]
-                )
+                SettingsBlock(header: "QUIET HOURS", footer: "Decide when Notion AI is off. During quiet hours the app asks before sending.", rows: [
+                    SettingsRow(
+                        title: "Quiet hours",
+                        subtitle: nil,
+                        accessory: .toggle(settings.quietHoursEnabled) { isOn in
+                            settings.quietHoursEnabled = isOn
+                            Feedback.toggle(isOn)
+                        }
+                    ),
+                    SettingsRow(
+                        title: "Start",
+                        subtitle: nil,
+                        accessory: .value(String(format: "%02d:00", settings.quietHoursStart)),
+                        action: { [weak self] in self?.pickHour(isStart: true) }
+                    ),
+                    SettingsRow(
+                        title: "End",
+                        subtitle: nil,
+                        accessory: .value(String(format: "%02d:00", settings.quietHoursEnd)),
+                        action: { [weak self] in self?.pickHour(isStart: false) }
+                    )
+                ])
             ]
 
         case .plugins:
             return [
-                SettingsBlock(
-                    header: nil,
-                    footer: "Plugin support ships with the desktop client only.",
-                    rows: [
-                        SettingsRow(title: "Installed plugins", accessory: .value("0"))
-                    ]
-                )
+                SettingsBlock(header: "PLUGINS", footer: "Plugins are a desktop-only surface in Notion today. Skills, agents and connectors cover the same ground in this build.", rows: [
+                    SettingsRow(title: "Skills", subtitle: "\(LibraryStore.shared.skills.count) available", accessory: .disclosure, action: { [weak self] in
+                        Feedback.tap()
+                        self?.navigationController?.pushViewController(
+                            SettingsDetailViewController(section: .skills),
+                            animated: true
+                        )
+                    }),
+                    SettingsRow(title: "Agents", subtitle: "\(LibraryStore.shared.agents.count) configured", accessory: .disclosure, action: { [weak self] in
+                        Feedback.tap()
+                        self?.navigationController?.pushViewController(
+                            SettingsDetailViewController(section: .agents),
+                            animated: true
+                        )
+                    }),
+                    SettingsRow(title: "Connectors", subtitle: "\(AppSettings.shared.enabledConnectorIDs.count) enabled", accessory: .disclosure, action: { [weak self] in
+                        Feedback.tap()
+                        self?.navigationController?.pushViewController(
+                            SettingsDetailViewController(section: .connectors),
+                            animated: true
+                        )
+                    })
+                ])
             ]
+
+        case .agents, .skills, .connectors:
+            return []
         }
     }
 
-    // MARK: - Helpers
+    // MARK: - Actions
 
-    private static func hourLabel(_ hour: Int) -> String {
-        let clamped = max(0, min(23, hour))
-        return String(format: "%02d:00", clamped)
+    private func refreshProfile(silent: Bool) {
+        if !silent { Feedback.tap() }
+        NotionAPI.shared.loadUserContent { [weak self] result in
+            guard let self = self else { return }
+            self.rebuild()
+            guard !silent else { return }
+            switch result {
+            case .success:
+                Feedback.success()
+            case .failure(let error):
+                Feedback.error()
+                let alert = UIAlertController(
+                    title: "Could not load account",
+                    message: error.localizedDescription,
+                    preferredStyle: .alert
+                )
+                alert.addAction(UIAlertAction(title: "OK", style: .default))
+                self.present(alert, animated: true)
+            }
+        }
     }
 
-    private func openWeb(_ path: String) {
-        guard let url = URL(string: NotionEndpoints.host + path) else { return }
-        present(SFSafariViewController(url: url), animated: true, completion: nil)
+    private func presentSwitcher() {
+        Feedback.tap()
+        let switcher = WorkspaceSwitcherViewController()
+        switcher.onSwitch = { [weak self] _ in
+            self?.rebuild()
+        }
+        navigationController?.pushViewController(switcher, animated: true)
+    }
+
+    private func presentModelPicker() {
+        Feedback.tap()
+        let settings = AppSettings.shared
+        let picker = ModelPickerViewController(model: settings.selectedModel, effort: settings.effort)
+        picker.onChange = { [weak self] model, effort in
+            settings.selectedModel = model
+            settings.effort = effort
+            self?.rebuild()
+        }
+        navigationController?.pushViewController(picker, animated: true)
     }
 
     private func editEndpoint() {
+        Feedback.tap()
         let alert = UIAlertController(
             title: "AI endpoint path",
-            message: "Path under /api/v3/",
+            message: "Path after api/v3/. The app also tries known fallbacks automatically.",
             preferredStyle: .alert
         )
         alert.addTextField { field in
@@ -337,54 +408,76 @@ final class SettingsDetailViewController: UIViewController {
             field.autocapitalizationType = .none
             field.autocorrectionType = .no
         }
-        alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak self] _ in
-            AppSettings.shared.aiEndpointPath = alert.textFields?.first?.text ?? ""
-            self?.rebuild()
-        })
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         alert.addAction(UIAlertAction(title: "Reset", style: .destructive) { [weak self] _ in
             AppSettings.shared.aiEndpointPath = NotionEndpoints.defaultAIPath
+            Feedback.warning()
             self?.rebuild()
         })
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel, handler: nil))
-        present(alert, animated: true, completion: nil)
+        alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak self] _ in
+            let value = (alert.textFields?.first?.text ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty { AppSettings.shared.aiEndpointPath = value }
+            Feedback.success()
+            self?.rebuild()
+        })
+        present(alert, animated: true)
     }
 
-    private func editHour(isStart: Bool) {
-        let alert = UIAlertController(
-            title: isStart ? "Quiet hours start" : "Quiet hours end",
-            message: "Hour of the day, 0 to 23",
-            preferredStyle: .alert
-        )
-        alert.addTextField { field in
-            field.keyboardType = .numberPad
-            field.text = String(isStart ? AppSettings.shared.quietHoursStart : AppSettings.shared.quietHoursEnd)
-        }
+    private func addMemory() {
+        Feedback.tap()
+        let alert = UIAlertController(title: "Remember this", message: nil, preferredStyle: .alert)
+        alert.addTextField { $0.placeholder = "I prefer short answers" }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak self] _ in
-            let value = Int(alert.textFields?.first?.text ?? "") ?? 0
-            let clamped = max(0, min(23, value))
-            if isStart {
-                AppSettings.shared.quietHoursStart = clamped
-            } else {
-                AppSettings.shared.quietHoursEnd = clamped
-            }
+            let text = (alert.textFields?.first?.text ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return }
+            LibraryStore.shared.addMemory(text: text, source: "Manual")
+            Feedback.success()
             self?.rebuild()
         })
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel, handler: nil))
-        present(alert, animated: true, completion: nil)
+        present(alert, animated: true)
+    }
+
+    private func pickHour(isStart: Bool) {
+        Feedback.tap()
+        let sheet = UIAlertController(
+            title: isStart ? "Quiet hours start" : "Quiet hours end",
+            message: nil,
+            preferredStyle: .actionSheet
+        )
+        for hour in stride(from: 0, to: 24, by: 1) {
+            sheet.addAction(UIAlertAction(title: String(format: "%02d:00", hour), style: .default) { [weak self] _ in
+                if isStart {
+                    AppSettings.shared.quietHoursStart = hour
+                } else {
+                    AppSettings.shared.quietHoursEnd = hour
+                }
+                Feedback.selection()
+                self?.rebuild()
+            })
+        }
+        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        sheet.popoverPresentationController?.sourceView = view
+        sheet.popoverPresentationController?.sourceRect = view.bounds
+        present(sheet, animated: true)
     }
 
     private func confirmSignOut() {
         let alert = UIAlertController(
-            title: "Sign out?",
-            message: "Your Notion session will be removed from this device.",
+            title: "Sign out of Notion?",
+            message: "Your local chats stay on the device.",
             preferredStyle: .alert
         )
-        alert.addAction(UIAlertAction(title: "Sign out", style: .destructive) { [weak self] _ in
-            NotionSession.shared.signOut()
-            self?.dismiss(animated: true, completion: nil)
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Sign out", style: .destructive) { _ in
+            Feedback.warning()
+            NotionSession.shared.signOut {
+                UIApplication.shared.windows.first?.rootViewController = LoginViewController()
+            }
         })
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel, handler: nil))
-        present(alert, animated: true, completion: nil)
+        present(alert, animated: true)
     }
 
     private func confirmDeleteChats() {
@@ -393,23 +486,13 @@ final class SettingsDetailViewController: UIViewController {
             message: "This cannot be undone.",
             preferredStyle: .alert
         )
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         alert.addAction(UIAlertAction(title: "Delete", style: .destructive) { _ in
             ConversationStore.shared.deleteAll()
-            Haptics.success()
+            Feedback.warning()
+            RootController.current?.startNewChat()
         })
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel, handler: nil))
-        present(alert, animated: true, completion: nil)
-    }
-
-    @objc private func toggleChanged(_ sender: UISwitch) {
-        let indexPath = IndexPath(row: sender.tag % 1000, section: sender.tag / 1000)
-        guard indexPath.section < blocks.count,
-              indexPath.row < blocks[indexPath.section].rows.count else { return }
-
-        if case .toggle(_, let handler) = blocks[indexPath.section].rows[indexPath.row].accessory {
-            handler(sender.isOn)
-            blocks = makeBlocks()
-        }
+        present(alert, animated: true)
     }
 }
 
@@ -430,40 +513,48 @@ extension SettingsDetailViewController: UITableViewDataSource, UITableViewDelega
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let row = blocks[indexPath.section].rows[indexPath.row]
-        let cell = UITableViewCell(style: .value1, reuseIdentifier: "DetailRow")
-
+        let cell = UITableViewCell(style: .subtitle, reuseIdentifier: nil)
         cell.backgroundColor = Theme.surface
         cell.textLabel?.text = row.title
-        cell.textLabel?.numberOfLines = 0
-        cell.textLabel?.font = AppSettings.shared.chatFont.font(size: 16)
+        cell.textLabel?.font = .systemFont(ofSize: 16)
         cell.textLabel?.textColor = row.destructive ? Theme.destructive : Theme.textPrimary
-        cell.detailTextLabel?.textColor = Theme.textSecondary
-        cell.detailTextLabel?.font = AppSettings.shared.chatFont.font(size: 14)
+        cell.textLabel?.numberOfLines = 0
         cell.detailTextLabel?.text = row.subtitle
+        cell.detailTextLabel?.textColor = Theme.textTertiary
+        cell.detailTextLabel?.font = .systemFont(ofSize: 12)
+        cell.detailTextLabel?.numberOfLines = 0
+        cell.tintColor = Theme.accent
         cell.accessoryView = nil
         cell.accessoryType = .none
-        cell.selectionStyle = row.action == nil ? .none : .default
 
         switch row.accessory {
         case .none:
-            break
-
-        case .checkmark(let isOn):
-            cell.accessoryType = isOn ? .checkmark : .none
-
+            cell.selectionStyle = row.action == nil ? .none : .default
         case .disclosure:
             cell.accessoryType = .disclosureIndicator
-
-        case .value(let value):
-            cell.detailTextLabel?.text = value
-
-        case .toggle(let isOn, _):
+        case .checkmark(let isOn):
+            cell.accessoryType = isOn ? .checkmark : .none
+        case .value(let text):
+            let label = UILabel()
+            label.text = text
+            label.textColor = Theme.textSecondary
+            label.font = .systemFont(ofSize: 14)
+            label.sizeToFit()
+            cell.accessoryView = label
+        case .toggle(let isOn, let handler):
             let toggle = UISwitch()
-            toggle.isOn = isOn
             toggle.onTintColor = Theme.accent
-            toggle.tag = indexPath.section * 1000 + indexPath.row
-            toggle.addTarget(self, action: #selector(toggleChanged(_:)), for: .valueChanged)
+            toggle.isOn = isOn
+            toggle.addAction(
+                UIAction { action in
+                    guard let control = action.sender as? UISwitch else { return }
+                    Feedback.toggle(control.isOn)
+                    handler(control.isOn)
+                },
+                for: .valueChanged
+            )
             cell.accessoryView = toggle
+            cell.selectionStyle = .none
         }
 
         return cell
@@ -472,5 +563,49 @@ extension SettingsDetailViewController: UITableViewDataSource, UITableViewDelega
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
         blocks[indexPath.section].rows[indexPath.row].action?()
+    }
+}
+
+// MARK: - Raw response viewer
+
+final class RawResponseViewController: UIViewController {
+    private let textView = UITextView()
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = Theme.background
+        title = "Last response"
+
+        navigationItem.rightBarButtonItem = UIBarButtonItem(
+            barButtonSystemItem: .action,
+            target: self,
+            action: #selector(copyPayload)
+        )
+
+        textView.translatesAutoresizingMaskIntoConstraints = false
+        textView.backgroundColor = Theme.codeBackground
+        textView.textColor = Theme.textSecondary
+        textView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        textView.isEditable = false
+        textView.textContainerInset = UIEdgeInsets(top: 14, left: 12, bottom: 14, right: 12)
+
+        let settings = AppSettings.shared
+        let payload = settings.lastRawResponse
+        textView.text = payload.isEmpty
+            ? "No response captured yet. Send a message first."
+            : settings.lastRequestInfo + "\n\n" + payload
+
+        view.addSubview(textView)
+        NSLayoutConstraint.activate([
+            textView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+            textView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            textView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            textView.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -12)
+        ])
+    }
+
+    @objc private func copyPayload() {
+        UIPasteboard.general.string = textView.text
+        Feedback.success()
     }
 }
